@@ -11,6 +11,14 @@ O projeto usa STM32CubeIDE/HAL e implementa:
 - conversao de velocidades do robo para velocidades das rodas
 - leitura da tensao de bateria por `ADC1`
 
+Hardware configurado no CubeMX:
+
+- `STM32F103RCTx` em `LQFP64`
+- `HSE 8 MHz` com `SYSCLK 72 MHz`
+- `USART2` em `1 Mbps`
+- `TIM1/TIM8` para PWM
+- `TIM2/TIM3/TIM4/TIM5` para encoder
+
 Documentacao:
 
 - [Visao geral da placa](docs/board-overview.md)

@@ -4,6 +4,20 @@
 
 Esta firmware controla 4 motores DC com encoder e fecha malha de velocidade em `1 kHz`. A placa recebe comandos de velocidade do robo por serial, converte para velocidades individuais das rodas e aplica PID em cada motor.
 
+## Fotos e referencias visuais
+
+### Placa completa
+
+![Vista geral da placa](board.png)
+
+### Interface externa
+
+![Interface e conectores da placa](interface.png)
+
+### Chip de acionamento
+
+![Driver principal de motor na placa](chip.png)
+
 ## Fluxo de controle
 
 1. `main()` inicializa GPIO, DMA, ADC, timers, I2C e `USART2`.
@@ -23,13 +37,36 @@ Esta firmware controla 4 motores DC com encoder e fecha malha de velocidade em `
 ## MCU e perifericos
 
 - MCU: `STM32F103RCTx`
-- Clock do sistema: `72 MHz` com HSE + PLL x9
+- Encapsulamento: `LQFP64`
+- Clock do sistema: `72 MHz` com cristal externo em `8 MHz` + `PLL x9`
 - `TIM1` e `TIM8`: PWM dos motores
 - `TIM2`, `TIM3`, `TIM4`, `TIM5`: interface encoder
 - `TIM6`: base de tempo do controle em `1 kHz`
 - `USART2`: comunicacao serial em `1000000 baud`
 - `ADC1` canal `IN14 / PC4`: leitura da bateria
 - `I2C2`: reservado em `PB10/PB11`
+
+## Arvore de clock
+
+![Clock tree do projeto](clock.png)
+
+Configuracao atual do CubeMX:
+
+- `HSE = 8 MHz`
+- `PLL source = HSE`
+- `PLL multiplier = x9`
+- `SYSCLK = 72 MHz`
+- `AHB = 72 MHz`
+- `APB1 = 36 MHz`
+- clocks efetivos dos timers em `APB1 = 72 MHz`
+- `APB2 = 72 MHz`
+- clock do ADC = `12 MHz` com prescaler `/6`
+
+Impacto direto no firmware:
+
+- `TIM1` e `TIM8` usam clock de `72 MHz`, o que leva a PWM de `30 kHz` com `ARR = 2399`
+- `TIM6` usa prescaler `71` e periodo `999`, gerando a interrupcao de `1 kHz`
+- os timers de encoder tambem operam com base de `72 MHz`
 
 ## Mapeamento dos motores
 
@@ -42,7 +79,7 @@ Ordem eletrica usada no firmware:
 
 Saidas PWM:
 
-- `M1`: `TIM1 CH2/CH3` nos pinos `PA9` e `PA10`, com complementares em `PB0` e `PB1`
+- `M1`: `TIM1 CH2/CH3` nos pinos `PA9` e `PA10`, com complementares `CH2N/CH3N` em `PB0` e `PB1`
 - `M2`: `TIM8 CH1/CH2` nos pinos `PC6` e `PC7`
 - `M3`: `TIM1 CH1/CH4` nos pinos `PA8` e `PA11`
 - `M4`: `TIM8 CH3/CH4` nos pinos `PC8` e `PC9`
@@ -55,6 +92,21 @@ Entradas de encoder:
 - `M4`: `TIM4` em `PB6` e `PB7`
 
 Observacao: o encoder de `M3` e invertido por software.
+
+## Pinagem geral
+
+![Pinout configurado no CubeMX](pinout.png)
+
+Pinos usados pelo firmware:
+
+- `PC13`: LED
+- `PD0` e `PD1`: oscilador externo `HSE`
+- `PA2/PA3`: `USART2 TX/RX`
+- `PC4`: bateria em `ADC1_IN14`
+- `PB10/PB11`: `I2C2 SCL/SDA`
+- `PA13/PA14`: `SWDIO/SWCLK`
+
+Pinos livres ou nao usados nesta firmware permanecem sem funcao aplicada no `.ioc`.
 
 ## Parametros atuais
 
