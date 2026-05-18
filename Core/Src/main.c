@@ -83,6 +83,15 @@ static uint32_t last_telemetry_tick = 0U;
 static volatile float vx = 0.0f;
 static volatile float vy = 0.0f;
 static volatile float w = 0.0f;
+volatile float serial_dbg_rx_vx = 0.0f;
+volatile float serial_dbg_rx_vy = 0.0f;
+volatile float serial_dbg_rx_omega = 0.0f;
+volatile uint32_t serial_dbg_rx_bytes = 0U;
+volatile uint32_t serial_dbg_rx_frames = 0U;
+volatile uint32_t serial_dbg_rx_bad_type = 0U;
+volatile uint32_t serial_dbg_rx_bad_crc = 0U;
+volatile uint16_t serial_dbg_crc_rx = 0U;
+volatile uint16_t serial_dbg_crc_calc = 0U;
 
 
 /* USER CODE END PV */
@@ -175,13 +184,17 @@ static void Serial_ProcessVelFrame(const uint8_t *buf)
 {
   if (buf[2] != RX_TYPE_VEL)
   {
+    serial_dbg_rx_bad_type++;
     return;
   }
 
   const uint16_t crc_rx = U16LE(&buf[18]);
   const uint16_t crc_ok = Crc16CcittFalse(buf, 18U);
+  serial_dbg_crc_rx = crc_rx;
+  serial_dbg_crc_calc = crc_ok;
   if (crc_rx != crc_ok)
   {
+    serial_dbg_rx_bad_crc++;
     return;
   }
 
@@ -191,6 +204,10 @@ static void Serial_ProcessVelFrame(const uint8_t *buf)
   memcpy(&vx, &buf[6], sizeof(float));
   memcpy(&vy, &buf[10], sizeof(float));
   memcpy(&w, &buf[14], sizeof(float));
+  serial_dbg_rx_vx = vx;
+  serial_dbg_rx_vy = vy;
+  serial_dbg_rx_omega = w;
+  serial_dbg_rx_frames++;
 
   AppC_WheelSpeeds wheels;
   AppC_RobotToWheels(
@@ -243,6 +260,7 @@ static void Serial_ProcessRx(void)
 
 static void Serial_ProcessByte(uint8_t b)
 {
+  serial_dbg_rx_bytes++;
   static uint8_t frame[RX_FRAME_LEN];
   static uint8_t idx = 0U;
   static uint8_t state = 0U;
@@ -445,24 +463,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // AppC_Tick();
-    // Serial_ProcessRx();
-    // Serial_TelemetryTask();
-      AppC_Tick();
-
-  AppC_WheelSpeeds wheels;
-  AppC_RobotToWheels(vx, vy, w, 0.03f, 0.09f, &wheels);
-
-  const float radps_to_rpm = 9.5492966f;
-
-  AppC_SetCommands(
-      wheels.m1 * radps_to_rpm,
-      wheels.m2 * radps_to_rpm,
-      wheels.m3 * radps_to_rpm,
-      wheels.m4 * radps_to_rpm,
-      0U);
-
-  Serial_TelemetryTask();
+    AppC_Tick();
+    Serial_ProcessRx();
   }
   /* USER CODE END 3 */
 }
@@ -999,7 +1001,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 1000000;
+  huart2.Init.BaudRate = 9600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;

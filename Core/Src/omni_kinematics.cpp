@@ -1,10 +1,13 @@
 #include "omni_kinematics.hpp"
 
+#include <algorithm>
 #include <cmath>
+
 
 namespace
 {
 constexpr float kPi = 3.14159265358979323846f;
+constexpr float kMaxWheelRadS = 62.83f; // 600 RPM
 // Electrical order: M1, M2, M3, M4
 // Physical placement:
 // M1: front-right, M2: front-left, M3: rear-left, M4: rear-right
@@ -40,6 +43,21 @@ void OmniKinematics::RobotToWheels(float vx, float vy, float omega, float outW[4
   {
     const float u = (t_[i][0] * vx) + (t_[i][1] * vy) + (t_[i][2] * omega);
     outW[i] = u / r_;
+  }
+  float maxAbs = 0.0f;
+
+  for (uint8_t i = 0; i < 4; i++)
+  {
+    maxAbs = std::max(maxAbs, std::fabs(outW[i]));
+  }
+
+  if (maxAbs > kMaxWheelRadS && maxAbs > 1.0e-6f)
+  {
+    const float scale = kMaxWheelRadS / maxAbs;
+    for (uint8_t i = 0; i < 4; i++)
+    {
+      outW[i] *= scale;
+    }
   }
 }
 
