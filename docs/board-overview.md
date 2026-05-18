@@ -74,24 +74,31 @@ Ordem eletrica usada no firmware:
 
 - `M1`: frente-direita
 - `M2`: frente-esquerda
-- `M3`: traseira-direita
-- `M4`: traseira-esquerda
+- `M3`: traseira-esquerda
+- `M4`: traseira-direita
 
-Saidas PWM:
+Mapeamento fisico atual entre roda e conector da placa:
 
-- `M1`: `TIM1 CH2/CH3` nos pinos `PA9` e `PA10`, com complementares `CH2N/CH3N` em `PB0` e `PB1`
-- `M2`: `TIM8 CH1/CH2` nos pinos `PC6` e `PC7`
-- `M3`: `TIM1 CH1/CH4` nos pinos `PA8` e `PA11`
-- `M4`: `TIM8 CH3/CH4` nos pinos `PC8` e `PC9`
+- roda `M1`: ligada no conector da placa `M3`
+- roda `M2`: ligada no conector da placa `M1`
+- roda `M3`: ligada no conector da placa `M4`
+- roda `M4`: ligada no conector da placa `M2`
 
-Entradas de encoder:
+Saidas PWM usadas por cada roda logica:
 
-- `M1`: `TIM5` em `PA0` e `PA1`
-- `M2`: `TIM3` em `PA6` e `PA7`
-- `M3`: `TIM2` em `PA15` e `PB3`
-- `M4`: `TIM4` em `PB6` e `PB7`
+- `M1`: conector `M3`, `TIM1 CH1/CH4` nos pinos `PA8` e `PA11`
+- `M2`: conector `M1`, `TIM1 CH2/CH3` nos pinos `PA9` e `PA10`, com complementares `CH2N/CH3N` em `PB0` e `PB1`
+- `M3`: conector `M4`, `TIM8 CH3/CH4` nos pinos `PC8` e `PC9`
+- `M4`: conector `M2`, `TIM8 CH1/CH2` nos pinos `PC6` e `PC7`
 
-Observacao: o encoder de `M3` e invertido por software.
+Entradas de encoder usadas por cada roda logica:
+
+- `M1`: conector `M3`, `TIM2` em `PA15` e `PB3`
+- `M2`: conector `M1`, `TIM5` em `PA0` e `PA1`
+- `M3`: conector `M4`, `TIM4` em `PB6` e `PB7`
+- `M4`: conector `M2`, `TIM3` em `PA6` e `PA7`
+
+Observacao: o encoder do conector `M3`, usado pela roda logica `M1`, e invertido por software.
 
 ## Pinagem geral
 

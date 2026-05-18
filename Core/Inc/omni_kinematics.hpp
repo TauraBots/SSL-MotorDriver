@@ -12,7 +12,7 @@ struct OmniRobotTwist
 class OmniKinematics
 {
 public:
-  // Wheel mounting angles (deg): M1=30, M2=150, M3=315, M4=225
+  // Wheel mounting angles (deg): M1=30, M2=150, M3=225, M4=315
   // Rolling direction is tangential: theta_i = phi_i + 90 deg.
   OmniKinematics(float wheelRadiusM = 0.03f, float robotRadiusM = 0.09f);
 

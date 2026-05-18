@@ -80,6 +80,11 @@ static uint8_t uart_tx_q_count = 0U;
 static volatile uint8_t uart_tx_busy = 0U;
 static uint32_t last_telemetry_tick = 0U;
 
+static volatile float vx = 0.0f;
+static volatile float vy = 0.0f;
+static volatile float w = 0.0f;
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -440,9 +445,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    AppC_Tick();
-    Serial_ProcessRx();
-    Serial_TelemetryTask();
+    // AppC_Tick();
+    // Serial_ProcessRx();
+    // Serial_TelemetryTask();
+      AppC_Tick();
+
+  AppC_WheelSpeeds wheels;
+  AppC_RobotToWheels(vx, vy, w, 0.03f, 0.09f, &wheels);
+
+  const float radps_to_rpm = 9.5492966f;
+
+  AppC_SetCommands(
+      wheels.m1 * radps_to_rpm,
+      wheels.m2 * radps_to_rpm,
+      wheels.m3 * radps_to_rpm,
+      wheels.m4 * radps_to_rpm,
+      0U);
+
+  Serial_TelemetryTask();
   }
   /* USER CODE END 3 */
 }

@@ -7,9 +7,9 @@ namespace
 constexpr float kPi = 3.14159265358979323846f;
 // Electrical order: M1, M2, M3, M4
 // Physical placement:
-// M1: front-right, M2: front-left, M3: rear-right, M4: rear-left
+// M1: front-right, M2: front-left, M3: rear-left, M4: rear-right
 // Frame: +x right, +y forward, angles CCW from +x.
-constexpr float kWheelPhiDeg[4] = {30.0f, 150.0f, 315.0f, 225.0f};
+constexpr float kWheelPhiDeg[4] = {30.0f, 150.0f, 225.0f, 315.0f};
 }
 
 OmniKinematics::OmniKinematics(float wheelRadiusM, float robotRadiusM)

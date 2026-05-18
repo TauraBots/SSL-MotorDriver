@@ -11,8 +11,8 @@ constexpr uint32_t kRpmSampleMs = 1U;
 constexpr uint32_t kBatterySampleMs = 100U;
 constexpr uint32_t kHeartbeatMs = 200U;
 constexpr float kControlDtS = 0.001f;
-constexpr float kPidKp = 16.9f;
-constexpr float kPidKi = 89.3f;
+constexpr float kPidKp = 17.6991f;
+constexpr float kPidKi = 80.2681f;
 constexpr float kPidKd = 0.001f;
 constexpr float kPidOutMin = -2399.0f;
 constexpr float kPidOutMax = 2399.0f;
@@ -43,15 +43,20 @@ volatile float rpm_m4 = 0.0f;
 volatile uint32_t battery_adc_raw = 0U;
 volatile float battery_voltage_v = 0.0f;
 
-App::App(const AppContext &ctx)
-    : m1_(ctx.pwmTim1, TIM_CHANNEL_2, TIM_CHANNEL_3, true),
-      m2_(ctx.pwmTim8, TIM_CHANNEL_1, TIM_CHANNEL_2),
+App::App(const AppContext &ctx): 
+      /*Connect PWM channels*/
+
+      m1_(ctx.pwmTim8, TIM_CHANNEL_1, TIM_CHANNEL_2),
+      m2_(ctx.pwmTim8, TIM_CHANNEL_3, TIM_CHANNEL_4),
       m3_(ctx.pwmTim1, TIM_CHANNEL_1, TIM_CHANNEL_4),
-      m4_(ctx.pwmTim8, TIM_CHANNEL_3, TIM_CHANNEL_4),
-      e1_(ctx.encTim1, kTicksPerRevOut),
-      e2_(ctx.encTim2, kTicksPerRevOut),
+      m4_(ctx.pwmTim1, TIM_CHANNEL_2, TIM_CHANNEL_3, true),
+
+      /*Connect encoders. Note that M3 is reversed to match the physical orientation on the robot.*/
+      e1_(ctx.encTim2, kTicksPerRevOut),
+      e2_(ctx.encTim4, kTicksPerRevOut),
       e3_(ctx.encTim3, kTicksPerRevOut, -1),
-      e4_(ctx.encTim4, kTicksPerRevOut),
+      e4_(ctx.encTim1, kTicksPerRevOut),
+
       batteryAdc_(ctx.batteryAdc),
       ledPort_(ctx.ledPort),
       ledPin_(ctx.ledPin),
