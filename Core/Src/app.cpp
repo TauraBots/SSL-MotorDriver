@@ -11,11 +11,12 @@ constexpr uint32_t kRpmSampleMs = 1U;
 constexpr uint32_t kBatterySampleMs = 100U;
 constexpr uint32_t kHeartbeatMs = 200U;
 constexpr float kControlDtS = 0.001f;
-constexpr float kPidKp = 17.6991f;
-constexpr float kPidKi = 80.2681f;
-constexpr float kPidKd = 0.001f;
-constexpr float kPidOutMin = -2399.0f;
-constexpr float kPidOutMax = 2399.0f;
+constexpr float kPiB0 = 5.64705043f;
+constexpr float kPiB1 = -5.62914013f;
+constexpr float kPiOutMin = -2399.0f;
+constexpr float kPiOutMax = 2399.0f;
+constexpr float kRefTauS = 0.15f;
+constexpr float kRefAlpha = kControlDtS / (kRefTauS + kControlDtS);
 constexpr float kLpB0 = 0.0036216815f;
 constexpr float kLpB1 = 0.0072433630f;
 constexpr float kLpB2 = 0.0036216815f;
@@ -62,10 +63,10 @@ App::App(const AppContext &ctx):
       ledPin_(ctx.ledPin),
       lastBatteryTick_(0),
       lastHeartbeatTick_(0),
-      pid1_{kPidKp, kPidKi, kPidKd, 0.0f, 0.0f, kPidOutMin, kPidOutMax},
-      pid2_{kPidKp, kPidKi, kPidKd, 0.0f, 0.0f, kPidOutMin, kPidOutMax},
-      pid3_{kPidKp, kPidKi, kPidKd, 0.0f, 0.0f, kPidOutMin, kPidOutMax},
-      pid4_{kPidKp, kPidKi, kPidKd, 0.0f, 0.0f, kPidOutMin, kPidOutMax},
+      pid1_{kPiB0, kPiB1, 0.0f, 0.0f, 0.0f, kPiOutMin, kPiOutMax},
+      pid2_{kPiB0, kPiB1, 0.0f, 0.0f, 0.0f, kPiOutMin, kPiOutMax},
+      pid3_{kPiB0, kPiB1, 0.0f, 0.0f, 0.0f, kPiOutMin, kPiOutMax},
+      pid4_{kPiB0, kPiB1, 0.0f, 0.0f, 0.0f, kPiOutMin, kPiOutMax},
       rpmFilt1_{0.0f, 0.0f, 0.0f, 0.0f},
       rpmFilt2_{0.0f, 0.0f, 0.0f, 0.0f},
       rpmFilt3_{0.0f, 0.0f, 0.0f, 0.0f},
@@ -171,10 +172,10 @@ void App::UpdateBattery()
 void App::ApplyMotors()
 {
   const bool brakeMode = (stop_mode_brake != 0U);
-  const int32_t out1 = static_cast<int32_t>(std::lround(ComputePid(pid1_, setpoint_m1, rpm_m1, kControlDtS)));
-  const int32_t out2 = static_cast<int32_t>(std::lround(ComputePid(pid2_, setpoint_m2, rpm_m2, kControlDtS)));
-  const int32_t out3 = static_cast<int32_t>(std::lround(ComputePid(pid3_, setpoint_m3, rpm_m3, kControlDtS)));
-  const int32_t out4 = static_cast<int32_t>(std::lround(ComputePid(pid4_, setpoint_m4, rpm_m4, kControlDtS)));
+  const int32_t out1 = static_cast<int32_t>(std::lround(ComputePiDiscrete(pid1_, setpoint_m1, rpm_m1)));
+  const int32_t out2 = static_cast<int32_t>(std::lround(ComputePiDiscrete(pid2_, setpoint_m2, rpm_m2)));
+  const int32_t out3 = static_cast<int32_t>(std::lround(ComputePiDiscrete(pid3_, setpoint_m3, rpm_m3)));
+  const int32_t out4 = static_cast<int32_t>(std::lround(ComputePiDiscrete(pid4_, setpoint_m4, rpm_m4)));
 
   m1_.ApplySigned(out1, brakeMode);
   m2_.ApplySigned(out2, brakeMode);
@@ -182,33 +183,38 @@ void App::ApplyMotors()
   m4_.ApplySigned(out4, brakeMode);
 }
 
-float App::ComputePid(PidState &pid, float setpointRpm, float measuredRpm, float dtS)
+float App::ComputePiDiscrete(PidState &pid, float setpointRpm, float measuredRpm)
 {
-  const float error = setpointRpm - measuredRpm;
-  const float dMeas = (measuredRpm - pid.lastMeas) / dtS;
-
-  pid.integral += pid.ki * error * dtS;
-  if (pid.integral > pid.outMax)
+  if (std::fabs(setpointRpm) < 1.0f)
   {
-    pid.integral = pid.outMax;
-  }
-  else if (pid.integral < pid.outMin)
-  {
-    pid.integral = pid.outMin;
+    pid.eLast = 0.0f;
+    pid.uLast = 0.0f;
+    pid.refFilt = 0.0f;
+    return 0.0f;
   }
 
-  float output = (pid.kp * error) + pid.integral - (pid.kd * dMeas);
-  if (output > pid.outMax)
+  pid.refFilt += kRefAlpha * (setpointRpm - pid.refFilt);
+
+  const float error = pid.refFilt - measuredRpm;
+  const float uUnsat = pid.uLast + (pid.b0 * error) + (pid.b1 * pid.eLast);
+  float uSat = uUnsat;
+
+  if (uSat > pid.outMax)
   {
-    output = pid.outMax;
+    uSat = pid.outMax;
   }
-  else if (output < pid.outMin)
+  else if (uSat < pid.outMin)
   {
-    output = pid.outMin;
+    uSat = pid.outMin;
   }
 
-  pid.lastMeas = measuredRpm;
-  return output;
+  if (std::fabs(uUnsat - uSat) < 1e-6f)
+  {
+    pid.uLast = uSat;
+    pid.eLast = error;
+  }
+
+  return uSat;
 }
 
 void App::Heartbeat()
