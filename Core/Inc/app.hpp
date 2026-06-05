@@ -30,11 +30,11 @@ public:
 private:
   struct PidState
   {
-    float kp;
-    float ki;
-    float kd;
-    float integral;
-    float lastMeas;
+    float b0;
+    float b1;
+    float eLast;
+    float uLast;
+    float refFilt;
     float outMin;
     float outMax;
   };
@@ -48,7 +48,7 @@ private:
   void UpdateBattery();
   void ApplyMotors();
   float LowPassStep(BiquadState &f, float x);
-  float ComputePid(PidState &pid, float setpointRpm, float measuredRpm, float dtS);
+  float ComputePiDiscrete(PidState &pid, float setpointRpm, float measuredRpm);
   void Heartbeat();
 
   Motor m1_;
