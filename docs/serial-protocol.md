@@ -9,7 +9,14 @@
 
 ## Comando recebido
 
-O firmware espera frames de `20 bytes`.
+O firmware aceita dois tipos de comando:
+
+- `0x01`: velocidade no frame do robo, compativel com o protocolo antigo.
+- `0x02`: velocidade no frame do campo, com `yaw` atual do robo para converter no firmware.
+
+### Tipo `0x01`: velocidade no frame do robo
+
+Frame de `20 bytes`.
 
 Layout:
 
@@ -27,6 +34,33 @@ Layout:
 Tipo suportado:
 
 - `0x01`: comando de velocidade do robo
+
+### Tipo `0x02`: velocidade no frame do campo
+
+Frame de `24 bytes`.
+
+Layout:
+
+| Offset | Tamanho | Campo |
+| --- | --- | --- |
+| 0 | 1 | `0x55` |
+| 1 | 1 | `0xAA` |
+| 2 | 1 | tipo = `0x02` |
+| 3 | 3 | reservado |
+| 6 | 4 | `float vx_field` |
+| 10 | 4 | `float vy_field` |
+| 14 | 4 | `float omega` |
+| 18 | 4 | `float yaw` |
+| 22 | 2 | `CRC16-CCITT-FALSE` little-endian dos bytes `0..21` |
+
+O `yaw` e o angulo do frame do robo no frame do campo, positivo anti-horario, em radianos.
+
+O firmware converte:
+
+```text
+vx_robot =  cos(yaw) * vx_field + sin(yaw) * vy_field
+vy_robot = -sin(yaw) * vx_field + cos(yaw) * vy_field
+```
 
 Convencoes usadas na cinematica:
 

@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_c_api.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,10 +40,13 @@
 #define UART_TX_QUEUE_DEPTH 8U
 #define TELEMETRY_PERIOD_MS 1U
 #define TELEMETRY_SOF 0xAA55U
-#define RX_FRAME_LEN 20U
+#define RX_FRAME_LEN_ROBOT_VEL 20U
+#define RX_FRAME_LEN_FIELD_VEL 24U
+#define RX_FRAME_LEN_MAX RX_FRAME_LEN_FIELD_VEL
 #define RX_SOF0 0x55U
 #define RX_SOF1 0xAAU
 #define RX_TYPE_VEL 0x01U
+#define RX_TYPE_FIELD_VEL 0x02U
 
 /* USER CODE END PD */
 
@@ -113,13 +117,14 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 static void Serial_ProcessRx(void);
 static void Serial_ProcessByte(uint8_t b);
-static void Serial_ProcessVelFrame(const uint8_t *buf);
+static void Serial_ProcessVelFrame(const uint8_t *buf, uint8_t len);
 static void Serial_TelemetryTask(void);
 static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_prio);
 static void Serial_TxKick(void);
 static uint8_t TelemetryChecksum(const uint8_t *data, uint16_t len);
 static uint16_t Crc16CcittFalse(const uint8_t *data, uint16_t len);
 static uint16_t U16LE(const uint8_t *p);
+static float ReadFloatLE(const uint8_t *p);
 
 /* USER CODE END PFP */
 
@@ -180,16 +185,32 @@ static uint16_t U16LE(const uint8_t *p)
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static void Serial_ProcessVelFrame(const uint8_t *buf)
+static float ReadFloatLE(const uint8_t *p)
 {
-  if (buf[2] != RX_TYPE_VEL)
+  float value = 0.0f;
+  memcpy(&value, p, sizeof(float));
+  return value;
+}
+
+static void Serial_ProcessVelFrame(const uint8_t *buf, uint8_t len)
+{
+  const uint8_t type = buf[2];
+  if (((type == RX_TYPE_VEL) && (len != RX_FRAME_LEN_ROBOT_VEL)) ||
+      ((type == RX_TYPE_FIELD_VEL) && (len != RX_FRAME_LEN_FIELD_VEL)))
   {
     serial_dbg_rx_bad_type++;
     return;
   }
 
-  const uint16_t crc_rx = U16LE(&buf[18]);
-  const uint16_t crc_ok = Crc16CcittFalse(buf, 18U);
+  if ((type != RX_TYPE_VEL) && (type != RX_TYPE_FIELD_VEL))
+  {
+    serial_dbg_rx_bad_type++;
+    return;
+  }
+
+  const uint16_t crc_offset = (uint16_t)(len - 2U);
+  const uint16_t crc_rx = U16LE(&buf[crc_offset]);
+  const uint16_t crc_ok = Crc16CcittFalse(buf, crc_offset);
   serial_dbg_crc_rx = crc_rx;
   serial_dbg_crc_calc = crc_ok;
   if (crc_rx != crc_ok)
@@ -198,12 +219,24 @@ static void Serial_ProcessVelFrame(const uint8_t *buf)
     return;
   }
 
-  float vx = 0.0f;
-  float vy = 0.0f;
-  float w = 0.0f;
-  memcpy(&vx, &buf[6], sizeof(float));
-  memcpy(&vy, &buf[10], sizeof(float));
-  memcpy(&w, &buf[14], sizeof(float));
+  float vx = ReadFloatLE(&buf[6]);
+  float vy = ReadFloatLE(&buf[10]);
+  float w = ReadFloatLE(&buf[14]);
+
+  if (type == RX_TYPE_FIELD_VEL)
+  {
+    const float yaw = ReadFloatLE(&buf[18]);
+    const float c = cosf(yaw);
+    const float s = sinf(yaw);
+    const float vx_field = vx;
+    const float vy_field = vy;
+
+    // Field-relative command -> robot-relative command.
+    // yaw is the robot frame angle in the field frame, positive CCW.
+    vx = (c * vx_field) + (s * vy_field);
+    vy = (-s * vx_field) + (c * vy_field);
+  }
+
   serial_dbg_rx_vx = vx;
   serial_dbg_rx_vy = vy;
   serial_dbg_rx_omega = w;
@@ -219,12 +252,13 @@ static void Serial_ProcessVelFrame(const uint8_t *buf)
       &wheels);
 
   const float radps_to_rpm = 9.5492966f;
+  const uint8_t brake_mode = ((fabsf(vx) < 1.0e-4f) && (fabsf(vy) < 1.0e-4f) && (fabsf(w) < 1.0e-4f)) ? 1U : 0U;
   AppC_SetCommands(
       wheels.m1 * radps_to_rpm,
       wheels.m2 * radps_to_rpm,
       wheels.m3 * radps_to_rpm,
       wheels.m4 * radps_to_rpm,
-      0U);
+      brake_mode);
 }
 
 static void Serial_ProcessRx(void)
@@ -261,8 +295,9 @@ static void Serial_ProcessRx(void)
 static void Serial_ProcessByte(uint8_t b)
 {
   serial_dbg_rx_bytes++;
-  static uint8_t frame[RX_FRAME_LEN];
+  static uint8_t frame[RX_FRAME_LEN_MAX];
   static uint8_t idx = 0U;
+  static uint8_t expected_len = RX_FRAME_LEN_ROBOT_VEL;
   static uint8_t state = 0U;
 
   switch (state)
@@ -280,6 +315,7 @@ static void Serial_ProcessByte(uint8_t b)
       {
         frame[1] = b;
         idx = 2U;
+        expected_len = RX_FRAME_LEN_ROBOT_VEL;
         state = 2U;
       }
       else if (b == RX_SOF0)
@@ -294,17 +330,39 @@ static void Serial_ProcessByte(uint8_t b)
 
     case 2U:
       frame[idx++] = b;
-      if (idx >= RX_FRAME_LEN)
+      if (idx == 3U)
       {
-        Serial_ProcessVelFrame(frame);
+        if (frame[2] == RX_TYPE_VEL)
+        {
+          expected_len = RX_FRAME_LEN_ROBOT_VEL;
+        }
+        else if (frame[2] == RX_TYPE_FIELD_VEL)
+        {
+          expected_len = RX_FRAME_LEN_FIELD_VEL;
+        }
+        else
+        {
+          serial_dbg_rx_bad_type++;
+          state = 0U;
+          idx = 0U;
+          expected_len = RX_FRAME_LEN_ROBOT_VEL;
+          break;
+        }
+      }
+
+      if (idx >= expected_len)
+      {
+        Serial_ProcessVelFrame(frame, expected_len);
         state = 0U;
         idx = 0U;
+        expected_len = RX_FRAME_LEN_ROBOT_VEL;
       }
       break;
 
     default:
       state = 0U;
       idx = 0U;
+      expected_len = RX_FRAME_LEN_ROBOT_VEL;
       break;
   }
 }
