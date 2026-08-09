@@ -7,7 +7,7 @@
 namespace
 {
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kMaxWheelRadS = 62.83f; // 600 RPM
+constexpr float kMaxWheelRadS = 52.36f; // 500 RPM
 // Electrical order: M1, M2, M3, M4
 // Physical placement:
 // M1: front-right, M2: front-left, M3: rear-left, M4: rear-right

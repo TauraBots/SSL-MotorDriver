@@ -209,7 +209,10 @@ void App::ApplyMotors()
   m4_.ApplySigned(out4, brakeMode);
 }
 
-float App::ComputePid(PidState &pid, float setpointRpm, float measuredRpm, float dtS)
+float App::ComputePid(PidState &pid,
+                      float setpointRpm,
+                      float measuredRpm,
+                      float dtS)
 {
   if (std::fabs(setpointRpm) < kZeroSetpointRpm)
   {
@@ -221,30 +224,42 @@ float App::ComputePid(PidState &pid, float setpointRpm, float measuredRpm, float
   const float error = setpointRpm - measuredRpm;
   const float dMeas = (measuredRpm - pid.lastMeas) / dtS;
 
-  pid.integral += pid.ki * error * dtS;
-  if (pid.integral > pid.outMax)
+  const float pTerm = pid.kp * error;
+  const float dTerm = -pid.kd * dMeas;
+
+  float integralCandidate =
+      pid.integral + (pid.ki * error * dtS);
+
+  if (integralCandidate > pid.outMax)
+    integralCandidate = pid.outMax;
+  else if (integralCandidate < pid.outMin)
+    integralCandidate = pid.outMin;
+
+  const float candidateOutput =
+      pTerm + integralCandidate + dTerm;
+
+  const bool saturatingHigh =
+      (candidateOutput > pid.outMax) && (error > 0.0f);
+
+  const bool saturatingLow =
+      (candidateOutput < pid.outMin) && (error < 0.0f);
+
+  if (!saturatingHigh && !saturatingLow)
   {
-    pid.integral = pid.outMax;
-  }
-  else if (pid.integral < pid.outMin)
-  {
-    pid.integral = pid.outMin;
+    pid.integral = integralCandidate;
   }
 
-  float output = (pid.kp * error) + pid.integral - (pid.kd * dMeas);
+  float output = pTerm + pid.integral + dTerm;
+
   if (output > pid.outMax)
-  {
     output = pid.outMax;
-  }
   else if (output < pid.outMin)
-  {
     output = pid.outMin;
-  }
 
   pid.lastMeas = measuredRpm;
+
   return output;
 }
-
 float App::ApplyStaticPwm(float setpointRpm, float measuredRpm, float piOut, uint32_t motorIndex)
 {
   if (std::fabs(setpointRpm) < kZeroSetpointRpm)

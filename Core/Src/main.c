@@ -97,6 +97,14 @@ volatile uint32_t serial_dbg_rx_bad_crc = 0U;
 volatile uint16_t serial_dbg_crc_rx = 0U;
 volatile uint16_t serial_dbg_crc_calc = 0U;
 
+volatile float dbg_wheel_m1_rpm = 0.0f;
+volatile float dbg_wheel_m2_rpm = 0.0f;
+volatile float dbg_wheel_m3_rpm = 0.0f;
+volatile float dbg_wheel_m4_rpm = 0.0f;
+
+volatile float serial_dbg_applied_vx = 0.0f;
+volatile float serial_dbg_applied_vy = 0.0f;
+volatile float serial_dbg_applied_omega = 0.0f;
 
 /* USER CODE END PV */
 
@@ -251,7 +259,29 @@ static void Serial_ProcessVelFrame(const uint8_t *buf, uint8_t len)
       0.09f,
       &wheels);
 
+  float applied_vx = 0.0f;
+  float applied_vy = 0.0f;
+  float applied_w  = 0.0f;
+
+  AppC_WheelsToRobot(
+      &wheels,
+      0.03f,
+      0.09f,
+      &applied_vx,
+      &applied_vy,
+      &applied_w);
+
   const float radps_to_rpm = 9.5492966f;
+
+  dbg_wheel_m1_rpm = wheels.m1 * radps_to_rpm;
+  dbg_wheel_m2_rpm = wheels.m2 * radps_to_rpm;
+  dbg_wheel_m3_rpm = wheels.m3 * radps_to_rpm;
+  dbg_wheel_m4_rpm = wheels.m4 * radps_to_rpm;
+
+  serial_dbg_applied_vx = applied_vx;
+  serial_dbg_applied_vy = applied_vy;
+  serial_dbg_applied_omega = applied_w;
+
   const uint8_t brake_mode = ((fabsf(vx) < 1.0e-4f) && (fabsf(vy) < 1.0e-4f) && (fabsf(w) < 1.0e-4f)) ? 1U : 0U;
   AppC_SetCommands(
       wheels.m1 * radps_to_rpm,
