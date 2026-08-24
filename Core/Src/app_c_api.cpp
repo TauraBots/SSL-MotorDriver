@@ -70,10 +70,10 @@ extern "C" void AppC_SetCommands(float m1, float m2, float m3, float m4, uint8_t
   setpoint_m2 = ClampSetpoint(m2);
   setpoint_m3 = ClampSetpoint(m3);
   setpoint_m4 = ClampSetpoint(m4);
-  cmd_m1 = static_cast<int32_t>(std::lround(setpoint_m1 * 10.0f));
-  cmd_m2 = static_cast<int32_t>(std::lround(setpoint_m2 * 10.0f));
-  cmd_m3 = static_cast<int32_t>(std::lround(setpoint_m3 * 10.0f));
-  cmd_m4 = static_cast<int32_t>(std::lround(setpoint_m4 * 10.0f));
+  //cmd_m1 = static_cast<int32_t>(std::lround(setpoint_m1 * 10.0f));
+  //cmd_m2 = static_cast<int32_t>(std::lround(setpoint_m2 * 10.0f));
+  //cmd_m3 = static_cast<int32_t>(std::lround(setpoint_m3 * 10.0f));
+  //cmd_m4 = static_cast<int32_t>(std::lround(setpoint_m4 * 10.0f));
   stop_mode_brake = (brake_mode != 0U) ? 1U : 0U;
 }
 

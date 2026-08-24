@@ -51,6 +51,16 @@ volatile float rpm_m4 = 0.0f;
 volatile uint32_t battery_adc_raw = 0U;
 volatile float battery_voltage_v = 0.0f;
 
+volatile uint16_t dbg_fault_m1 = 0;
+volatile uint16_t dbg_fault_m2 = 0;
+volatile uint16_t dbg_fault_m3 = 0;
+volatile uint16_t dbg_fault_m4 = 0;
+
+volatile int32_t dbg_prefault_m1 = 0;
+volatile int32_t dbg_prefault_m2 = 0;
+volatile int32_t dbg_prefault_m3 = 0;
+volatile int32_t dbg_prefault_m4 = 0;
+
 App::App(const AppContext &ctx): 
       /*Connect PWM channels*/
 
@@ -193,6 +203,12 @@ void App::ApplyMotors()
   int32_t out2 = static_cast<int32_t>(std::lround(ApplyStaticPwm(setpoint_m2, rpm_m2, piOut2, 1U)));
   int32_t out3 = static_cast<int32_t>(std::lround(ApplyStaticPwm(setpoint_m3, rpm_m3, piOut3, 2U)));
   int32_t out4 = static_cast<int32_t>(std::lround(ApplyStaticPwm(setpoint_m4, rpm_m4, piOut4, 3U)));
+
+  dbg_prefault_m1 = out1;
+  dbg_prefault_m2 = out2;
+  dbg_prefault_m3 = out3;
+  dbg_prefault_m4 = out4;
+
   out1 = ApplyEncoderFaultProtection(0U, pid1_, setpoint_m1, rpm_m1, out1);
   out2 = ApplyEncoderFaultProtection(1U, pid2_, setpoint_m2, rpm_m2, out2);
   out3 = ApplyEncoderFaultProtection(2U, pid3_, setpoint_m3, rpm_m3, out3);
@@ -202,6 +218,11 @@ void App::ApplyMotors()
   cmd_m2 = out2;
   cmd_m3 = out3;
   cmd_m4 = out4;
+
+  dbg_fault_m1 = encoderFaultCount_[0];
+  dbg_fault_m2 = encoderFaultCount_[1];
+  dbg_fault_m3 = encoderFaultCount_[2];
+  dbg_fault_m4 = encoderFaultCount_[3];
 
   m1_.ApplySigned(out1, brakeMode);
   m2_.ApplySigned(out2, brakeMode);
