@@ -3,6 +3,12 @@ QWidget { background: #121417; }
 QMainWindow { background: #121417; }
 QFrame#header { background: #161B22; border-bottom: 1px solid #30363D; }
 QFrame#headerStatusItem { background-color: #1B1F24; border: 1px solid #30363D; border-radius: 7px; }
+QFrame#headerControls { background-color: #1B1F24; border: 1px solid #30363D; border-radius: 7px; }
+QLabel#headerControlLabel { background-color: transparent; color: #6E7681; font-size: 7pt; font-weight: 700; letter-spacing: 1px; }
+QFrame#headerControls QComboBox { min-height: 22px; padding: 3px 6px; }
+QFrame#headerControls QComboBox::drop-down { width: 0; border: none; }
+QFrame#headerControls QComboBox::down-arrow { image: none; width: 0; height: 0; }
+QFrame#headerControls QPushButton { min-height: 22px; padding: 4px 9px; }
 QLabel#headerStatusLabel { background-color: transparent; color: #6E7681; font-size: 7pt; font-weight: 700; letter-spacing: 1px; }
 QLabel#headerStatusValue { background-color: transparent; color: #E6EDF3; font-size: 9pt; font-weight: 700; }
 QFrame#sidebar { background: #161B22; border-right: 1px solid #30363D; }
@@ -27,7 +33,9 @@ QFrame#fleetCard { background: #1B1F24; border: 1px solid #30363D; border-radius
 QFrame#fleetCard[active="true"] { border: 2px solid #00A8FF; background: #1B2B38; }
 QLabel#fleetRobotTitle { background-color: transparent; color: #FFFFFF; font-size: 13pt; font-weight: 700; }
 QLabel#fleetMetric { background-color: transparent; color: #8B949E; font-size: 10pt; font-weight: 600; }
+QLabel#fleetMeta { background-color: transparent; color: #6E7681; font-family: "Cascadia Mono", "Consolas"; font-size: 8pt; }
 QLabel#brand { color: #FFFFFF; font-size: 18pt; font-weight: 700; letter-spacing: 1px; }
+QLabel#brandIcon { background-color: transparent; padding: 3px; }
 QLabel#pageTitle { color: #FFFFFF; font-size: 20pt; font-weight: 700; }
 QLabel#section { color: #E6EDF3; font-size: 11pt; font-weight: 700; letter-spacing: 1px; }
 QLabel#muted { color: #8B949E; }
@@ -40,7 +48,7 @@ QLabel#globalStatus[online="true"] { color: #3FB950; border-color: #3FB950; back
 QLabel#controlTarget { color: #00A8FF; border: 1px solid #00A8FF; border-radius: 12px; padding: 6px 14px; font-weight: 700; }
 QLabel#key { background: #21262D; border: 1px solid #30363D; border-radius: 6px; padding: 10px 18px; font-weight: 700; }
 QLabel#key[pressed="true"] { background: #00A8FF; color: #FFFFFF; border-color: #58C8FF; }
-QPushButton { background: #21262D; border: 1px solid #3D444D; border-radius: 6px; padding: 9px 15px; font-weight: 650; }
+QPushButton { background: #21262D; border: 1px solid #3D444D; border-radius: 5px; padding: 6px 11px; font-weight: 650; }
 QPushButton:hover { background: #2D333B; border-color: #00A8FF; }
 QPushButton:pressed { background: #161B22; }
 QPushButton:disabled { color: #6E7681; background: #161B22; border-color: #30363D; }
@@ -48,7 +56,9 @@ QPushButton[accent="true"] { background: #0078B8; border-color: #00A8FF; color: 
 QPushButton[danger="true"], QPushButton#stopButton { background: #B62324; border: 1px solid #F85149; color: white; }
 QPushButton#stopButton { font-size: 15pt; font-weight: 800; min-height: 54px; }
 QPushButton#stopButton:hover { background: #D03533; }
-QPushButton#nav { background: transparent; border: none; border-radius: 6px; color: #8B949E; padding: 11px 14px; text-align: left; }
+QPushButton#fleetSelect { max-height: 28px; padding: 4px 10px; }
+QPushButton#discoverButton { max-height: 30px; padding: 5px 12px; }
+QPushButton#nav { background: transparent; border: none; border-radius: 6px; color: #8B949E; padding: 8px 12px; text-align: left; }
 QPushButton#nav:hover { background: #21262D; color: #E6EDF3; }
 QPushButton#nav:checked { background: #1B2B38; color: #58C8FF; border-left: 3px solid #00A8FF; }
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget { background: #0D1117; border: 1px solid #30363D; border-radius: 6px; padding: 7px; selection-background-color: #0078B8; }

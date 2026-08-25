@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QStackedWidget, QStyle, QVBoxLayout, QWidget
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
 from core import RadioManager, telemetry_csv_row
 from core.telemetry import CSV_HEADER
@@ -26,47 +27,64 @@ class MainWindow(QMainWindow):
 
     def __init__(self, args, parent=None):
         super().__init__(parent); self.args = args; self.manager = RadioManager(self); self.pressed_keys = set(); self.discovered_boards = []
-        self.log_file = self.log_writer = None; self.config_busy = False
-        self.setWindowTitle("TauraBots Robot Control Center"); self.resize(1120, 740); self.setMinimumSize(920, 640)
+        self.log_file = self.log_writer = None; self.config_busy = False; self._last_target_warning = 0.0
+        self.setWindowTitle("TAURABOTS - Ground Control Center"); self.resize(1120, 740); self.setMinimumSize(920, 640)
+        icon_dir = Path(__file__).parent / "assets" / "icons"
+        self.setWindowIcon(QIcon(str(icon_dir / "icon-white.svg")))
         theme = Path(__file__).parents[1] / "styles" / "theme.qss"; self.setStyleSheet(theme.read_text(encoding="utf-8"))
         self._build(); self._connect_signals(); self.refresh_ports(); QApplication.instance().installEventFilter(self)
 
     def _build(self):
         root = QWidget(); outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
-        header = QFrame(); header.setObjectName("header"); row = QHBoxLayout(header); row.setContentsMargins(24, 14, 24, 14)
-        brand = QVBoxLayout(); title = QLabel("TAURABOTS CONTROL CENTER"); title.setObjectName("brand"); brand.addWidget(title)
-        subtitle = QLabel("SSL MOTOR DRIVER"); subtitle.setObjectName("eyebrow"); brand.addWidget(subtitle); row.addLayout(brand); row.addStretch()
-        self.radio_status = HeaderStatusItem("Radio link", "OFFLINE"); self.robots_status = HeaderStatusItem("Robots online", "0"); self.target_status = HeaderStatusItem("Control target", "NONE"); self.latency_status = HeaderStatusItem("Link latency", "—"); self.system_status = HeaderStatusItem("System status", "OFFLINE")
-        for widget in (self.radio_status, self.robots_status, self.target_status, self.latency_status, self.system_status): row.addWidget(widget)
+        header = QFrame(); header.setObjectName("header"); header_layout = QVBoxLayout(header); header_layout.setContentsMargins(24, 10, 24, 10); header_layout.setSpacing(8); row = QHBoxLayout(); header_layout.addLayout(row)
+        icon_dir = Path(__file__).parent / "assets" / "icons"
+        brand_icon = QLabel(); brand_icon.setObjectName("brandIcon"); brand_icon.setPixmap(QIcon(str(icon_dir / "icon-white.svg")).pixmap(46, 46)); brand_icon.setFixedSize(52, 52); row.addWidget(brand_icon)
+        #brand = QVBoxLayout(); title = QLabel("GROUND CONTROL CENTER"); title.setObjectName("brand"); brand.addWidget(title)
+        #subtitle = QLabel("SSL MOTOR DRIVER"); subtitle.setObjectName("eyebrow"); brand.addWidget(subtitle); row.addLayout(brand)
+        row.addStretch(1)
+        controls = QFrame(); controls.setObjectName("headerControls"); controls.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred); control_row = QHBoxLayout(controls); control_row.setContentsMargins(10, 6, 10, 6); control_row.setSpacing(7)
+        self.header_port = QComboBox(); self.header_port.setEditable(False); self.header_port.setFixedWidth(120)
+        self.header_baud = QComboBox(); self.header_baud.setEditable(False); self.header_baud.addItems(["9600", "115200", "1000000"]); self.header_baud.setCurrentText(str(self.args.baud)); self.header_baud.setFixedWidth(92)
+        if self.args.port: self.header_port.setCurrentText(self.args.port)
+        for label_text, widget in (("SERIAL PORT", self.header_port), ("BAUD RATE", self.header_baud)):
+            field = QVBoxLayout(); field.setContentsMargins(0, 0, 0, 0); field.setSpacing(2)
+            label = QLabel(label_text); label.setObjectName("headerControlLabel"); label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+            field.addWidget(label); field.addWidget(widget); control_row.addLayout(field)
+        self.header_refresh = QPushButton("REFRESH"); self.header_refresh.setFixedWidth(88); control_row.addWidget(self.header_refresh, 0, Qt.AlignmentFlag.AlignBottom)
+        self.header_connect = QPushButton("CONNECT"); self.header_connect.setFixedWidth(112); self.header_connect.setProperty("accent", True); control_row.addWidget(self.header_connect, 0, Qt.AlignmentFlag.AlignBottom); row.addWidget(controls)
+        self.radio_status = HeaderStatusItem("Radio status", "OFFLINE"); self.robots_status = HeaderStatusItem("Robots online", "0"); self.latency_status = HeaderStatusItem("Link latency", "—"); self.system_status = HeaderStatusItem("System status", "OFFLINE")
+        status_row = QHBoxLayout(); status_row.setSpacing(8)
+        for widget in (self.radio_status, self.robots_status, self.latency_status, self.system_status): status_row.addWidget(widget, 1)
+        header_layout.addLayout(status_row)
         outer.addWidget(header)
         body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
         sidebar = QFrame(); sidebar.setObjectName("sidebar"); sidebar.setFixedWidth(205); navigation = QVBoxLayout(sidebar); navigation.setContentsMargins(14, 20, 14, 18)
-        icons = {"connection": self.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon),
-                 "battery": self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon),
-                 "robot": self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
-                 "warning": self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning),
-                 "motor": self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)}
+        svg = lambda name: QIcon(str(icon_dir / f"{name}.svg"))
+        icons = {"connection": svg("radio"), "battery": svg("battery"), "robot": svg("robot"),
+                 "warning": svg("diagnostics"), "motor": svg("motor")}
         self.stack = QStackedWidget(); self.dashboard = DashboardPanel(icons); self.fleet = FleetPanel(); self.control = ControlPanel(self.args); self.telemetry = TelemetryPanel(); self.config = ConfigPanel(); self.diagnostics = DiagnosticsPanel(); self.analysis = AnalysisPanel()
-        pages = (("VISÃO GERAL", self.dashboard, QStyle.StandardPixmap.SP_ComputerIcon),
-                 ("FLEET", self.fleet, QStyle.StandardPixmap.SP_DirIcon),
-                 ("CONTROLE", self.control, QStyle.StandardPixmap.SP_MediaPlay),
-                 ("TELEMETRIA", self.telemetry, QStyle.StandardPixmap.SP_FileDialogDetailedView),
-                 ("CONFIGURAÇÃO", self.config, QStyle.StandardPixmap.SP_FileDialogContentsView),
-                 ("DIAGNÓSTICO", self.diagnostics, QStyle.StandardPixmap.SP_MessageBoxWarning),
-                 ("ANÁLISE DE DADOS", self.analysis, QStyle.StandardPixmap.SP_FileDialogInfoView)); self.nav_buttons = []
+        pages = (("VISÃO GERAL", self.dashboard, svg("robot")),
+                 ("FLEET", self.fleet, svg("radio")),
+                 ("CONTROLE", self.control, svg("motor")),
+                 ("TELEMETRIA", self.telemetry, svg("chart")),
+                 ("CONFIGURAÇÃO", self.config, svg("settings")),
+                 ("DIAGNÓSTICO", self.diagnostics, svg("diagnostics")),
+                 ("ANÁLISE DE DADOS", self.analysis, svg("chart"))); self.nav_buttons = []
         for index, (name, page, icon) in enumerate(pages):
-            button = QPushButton(self.style().standardIcon(icon), name); button.setObjectName("nav"); button.setCheckable(True); button.clicked.connect(lambda checked=False, i=index: self.navigate(i)); navigation.addWidget(button); self.nav_buttons.append(button); self.stack.addWidget(page)
+            button = QPushButton(icon, name); button.setObjectName("nav"); button.setCheckable(True); button.clicked.connect(lambda checked=False, i=index: self.navigate(i)); navigation.addWidget(button); self.nav_buttons.append(button); self.stack.addWidget(page)
         navigation.addStretch(); stop = QPushButton("EMERGENCY STOP"); stop.setProperty("danger", True); stop.setMinimumHeight(48); stop.clicked.connect(self.emergency_stop); navigation.addWidget(stop)
         body.addWidget(sidebar); body.addWidget(self.stack, 1); outer.addLayout(body, 1); self.setCentralWidget(root)
         self.footer_status = QLabel("NO PORT  |  — BAUD  |  ROBOT —  |  FIRMWARE —  |  OFFLINE"); self.footer_status.setObjectName("footerStatus")
         self.statusBar().addWidget(self.footer_status, 1); self.navigate(0)
 
     def _connect_signals(self):
-        self.control.connect_requested.connect(self.toggle_connection); self.control.refresh_requested.connect(self.refresh_ports); self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
-        self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
-        self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(lambda message: self.show_error("Comunicação", message))
+        self.header_connect.clicked.connect(self.toggle_connection); self.header_refresh.clicked.connect(self.refresh_ports)
+        self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
+        self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.fleet.discovery_requested.connect(self.manager.discover_robots); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
+        self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(self.on_communication_error)
         self.manager.boards_discovered.connect(self.show_boards); self.manager.board_configured.connect(self.configuration_succeeded); self.manager.motion_configured.connect(self.motion_configuration_succeeded); self.manager.configuration_finished.connect(self.finish_config_action); self.plots_ready.connect(self.on_plots_ready)
         self.manager.robots.system_state_changed.connect(self.update_system_header); self.manager.robots.fleet_changed.connect(self.update_fleet); self.manager.robots.active_robot_changed.connect(self.active_robot_changed)
+        self.manager.discovery_started.connect(lambda: self.fleet.set_discovering(True)); self.manager.discovery_finished.connect(self.discovery_finished)
 
     def navigate(self, index):
         self.stack.setCurrentIndex(index)
@@ -75,21 +93,33 @@ class MainWindow(QMainWindow):
     def update_system_header(self, state):
         self.radio_status.set_status("CONNECTED" if state.radio_connected else "OFFLINE", "ok" if state.radio_connected else "error")
         self.robots_status.set_status(str(state.online_robot_count), "ok" if state.online_robot_count else "off")
-        self.target_status.set_status(f"ROBOT {state.active_robot_id}" if state.active_robot_id else "NONE", "ok" if state.active_robot_id else "warning")
         self.latency_status.set_status(f"{state.latency_ms} ms" if state.latency_ms is not None else "NO DATA", "ok" if state.latency_ms is not None and state.latency_ms < 100 else "warning")
         system_state = "ok" if state.system_status == "READY" else "warning" if state.system_status == "WARNING" else "error"
         self.system_status.set_status(state.system_status, system_state)
 
     def update_fleet(self, robots):
         self.fleet.set_fleet(robots, self.manager.robots.system_state.active_robot_id)
+        active = self.manager.robots.active_robot
+        self.dashboard.set_robot(active)
+        available = active is not None and active.connected and self.manager.is_connected
+        self.control.set_active_robot(active.robot_id if available else None)
+        if active is not None and not active.connected:
+            self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning")
+
+    def discovery_finished(self, robots):
+        self.fleet.set_discovering(False); self.toast(f"Discovery complete: {sum(robot.connected for robot in robots)} robot(s) online", "info")
 
     def active_robot_changed(self, robot):
         available = robot is not None and robot.connected and self.manager.is_connected
         self.dashboard.set_robot(robot); self.control.set_active_robot(robot.robot_id if available else None)
-        if robot: self.control.robot.setCurrentText(robot.robot_id)
         self.update_fleet(self.manager.robots.robots)
 
     def select_fleet_robot(self, robot_id):
+        robot = self.manager.robots.ensure_robot(robot_id)
+        if not robot.connected:
+            self.warn_no_control_target(); return
+        if self.manager.robots.system_state.active_robot_id == robot_id:
+            self.manager.clear_robot_selection(); self.toast(f"Robot {robot_id} deselected", "info"); return
         self.manager.select_robot(robot_id); self.toast(f"Control target changed to Robot {robot_id}", "info")
 
     def can_control(self):
@@ -98,17 +128,25 @@ class MainWindow(QMainWindow):
 
     def queue_kick(self, power):
         if self.can_control(): self.manager.queue_kick(power)
+        else: self.warn_no_control_target()
+
+    def warn_no_control_target(self):
+        now = time.monotonic()
+        if now - self._last_target_warning < 1.0: return
+        self._last_target_warning = now
+        QMessageBox.warning(self, "No control target",
+                            "Select an online robot in the Fleet before sending commands.")
 
     def refresh_ports(self):
-        current = self.control.port.currentText(); ports = self.manager.available_ports()
-        self.control.port.clear(); self.control.port.addItems(ports)
-        if current: self.control.port.setCurrentText(current)
-        elif self.args.port: self.control.port.setCurrentText(self.args.port)
+        current = self.header_port.currentText(); ports = self.manager.available_ports()
+        self.header_port.clear(); self.header_port.addItems(ports)
+        if current: self.header_port.setCurrentText(current)
+        elif self.args.port: self.header_port.setCurrentText(self.args.port)
 
     def serial_settings(self):
-        port = self.control.port.currentText().strip()
+        port = self.header_port.currentText().strip()
         if not port: raise ValueError("Selecione uma porta serial")
-        baud = int(self.control.baud.currentText());
+        baud = int(self.header_baud.currentText());
         if baud <= 0: raise ValueError("Baud rate inválido")
         return port, baud
 
@@ -116,14 +154,21 @@ class MainWindow(QMainWindow):
         if self.manager.is_connected: self.manager.disconnect_serial(); return
         try: port, baud = self.serial_settings()
         except Exception as exc: self.show_error("Conexão", str(exc)); return
-        self.manager.connect_serial(port, baud, self.control.robot.currentText())
+        self.manager.connect_serial(port, baud, "A")
 
     def on_connected(self, port, baud, robot_id):
-        self.control.connect_button.setText("DESCONECTAR"); self.control.robot.setEnabled(False); self.control.status.setText("COMANDO ATIVO"); self.footer_status.setText(f"{port}  |  {baud} BAUD  |  AIRPORT ONLINE"); self.active_robot_changed(self.manager.robots.active_robot); self.toast(f"Radio connected; Robot {robot_id} active", "success")
+        self.header_connect.setText("DISCONNECT"); self.header_port.setEnabled(False); self.header_baud.setEnabled(False); self.header_refresh.setEnabled(False); self.control.status.setText("SELECT A ROBOT IN FLEET"); self.footer_status.setText(f"{port}  |  {baud} BAUD  |  AIRPORT ONLINE"); self.active_robot_changed(None); self.toast("Radio connected; discovering robots", "success"); QTimer.singleShot(100, self.manager.discover_robots)
 
     def on_disconnected(self):
         self.pressed_keys.clear(); [self.control.set_key(key, False) for key in self.control.keys]
-        self.control.connect_button.setText("CONECTAR"); self.control.robot.setEnabled(True); self.control.status.setText("AGUARDANDO CONEXÃO"); self.footer_status.setText("NO RADIO LINK  |  AIRPORT OFFLINE"); self.control.set_active_robot(None); self.dashboard.set_robot(None)
+        self.header_connect.setText("CONNECT"); self.header_port.setEnabled(True); self.header_baud.setEnabled(True); self.header_refresh.setEnabled(True); self.control.status.setText("AGUARDANDO CONEXÃO"); self.footer_status.setText("NO RADIO LINK  |  AIRPORT OFFLINE"); self.control.set_active_robot(None); self.dashboard.set_robot(None)
+
+    def on_communication_error(self, message):
+        if not self.manager.is_connected:
+            self.on_disconnected()
+        self.radio_status.set_status("OFFLINE", "error")
+        self.system_status.set_status("CONNECTION ERROR", "error")
+        self.toast(f"Connection error: {message}", "error")
 
     def _update_target(self):
         if not self.can_control(): return
@@ -138,6 +183,8 @@ class MainWindow(QMainWindow):
             key = {Qt.Key.Key_W: "w", Qt.Key.Key_A: "a", Qt.Key.Key_S: "s", Qt.Key.Key_D: "d", Qt.Key.Key_Q: "q", Qt.Key.Key_E: "e", Qt.Key.Key_Space: "space", Qt.Key.Key_K: "k"}.get(event.key())
             if key:
                 pressed = event.type() == QEvent.Type.KeyPress
+                if pressed and not self.can_control():
+                    self.warn_no_control_target(); return True
                 if key == "k" and pressed: self.queue_kick(self.control.kick.value())
                 elif pressed: self.pressed_keys.add(key)
                 else: self.pressed_keys.discard(key)
@@ -157,13 +204,16 @@ class MainWindow(QMainWindow):
         self.control.set_command(vx, vy, omega); self.dashboard.set_command(vx, vy, omega); self.telemetry.append_command(vx, vy, omega); self.diagnostics.tx.setText(str(sequence))
 
     def update_telemetry(self, data):
-        latency = max(0, int((time.monotonic() - data.get("received_at", time.monotonic())) * 1000))
+        latency = data.get("latency_ms")
+        if latency is None: latency = 0
         if data.get("robot_id") == self.manager.robots.system_state.active_robot_id:
             self.telemetry.update_telemetry(data, latency); self.dashboard.set_telemetry(data, latency); self.diagnostics.update_telemetry(data, latency)
         if self.log_writer: self.log_writer.writerow(telemetry_csv_row(data)); self.log_file.flush()
 
     def telemetry_lost(self):
-        self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning"); self.dashboard.watchdog_card.update_status("WARNING", "TELEMETRY LOST", "warning"); self.diagnostics.watchdog.setText("TELEMETRIA PERDIDA"); self.toast("Telemetry lost", "warning")
+        active = self.manager.robots.active_robot
+        if active is not None and not active.connected:
+            self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning"); self.dashboard.watchdog_card.update_status("WARNING", "TELEMETRY LOST", "warning"); self.diagnostics.watchdog.setText("TELEMETRIA PERDIDA"); self.toast("Telemetry lost", "warning")
 
     def toggle_log(self):
         if self.log_file:
@@ -174,7 +224,6 @@ class MainWindow(QMainWindow):
 
     def _begin_config(self):
         if self.config_busy: return None
-        if self.manager.is_connected: self.manager.disconnect_serial()
         try: settings = self.serial_settings()
         except Exception as exc: self.show_error("Configuração", str(exc)); return None
         self.config_busy = True; self.config.set_busy(True); return settings
@@ -206,9 +255,9 @@ class MainWindow(QMainWindow):
     def select_board(self, index):
         if 0 <= index < len(self.discovered_boards):
             value = self.discovered_boards[index]; self.config.uid.setText(value[2].hex().upper()); self.config.set_actions_enabled(True)
-            if ord("A") <= value[4] <= ord("Z"): self.control.robot.setCurrentText(chr(value[4])); self.config.robot_id.setCurrentText(chr(value[4]))
+            if ord("A") <= value[4] <= ord("Z"): self.config.robot_id.setCurrentText(chr(value[4]))
 
-    def configuration_succeeded(self, robot_id): self.control.robot.setCurrentText(robot_id); self.config.robot_id.setCurrentText(robot_id); self.toast(f"Robot ID {robot_id} saved", "success")
+    def configuration_succeeded(self, robot_id): self.config.robot_id.setCurrentText(robot_id); self.toast(f"Robot ID {robot_id} saved", "success")
     def motion_configuration_succeeded(self, linear, angular): self.toast(f"Motion limits saved · {linear:.2f} m/s² · {angular:.2f} rad/s²", "success")
 
     def generate_plots(self, path):

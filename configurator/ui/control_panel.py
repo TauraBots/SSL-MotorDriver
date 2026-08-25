@@ -1,13 +1,13 @@
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QDial, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDial, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 from widgets import CardWidget
 from .widgets import JoystickWidget, LedIndicator
 
 
 class ControlPanel(QWidget):
-    connect_requested = Signal(); refresh_requested = Signal(); kick_requested = Signal(int)
-    virtual_key = Signal(str, bool); joystick_changed = Signal(float, float, float); stop_requested = Signal()
+    kick_requested = Signal(int); virtual_key = Signal(str, bool)
+    joystick_changed = Signal(float, float, float); stop_requested = Signal()
 
     def __init__(self, args, parent=None):
         super().__init__(parent); self._joystick_x = self._joystick_y = self._rotation = 0.0
@@ -15,15 +15,6 @@ class ControlPanel(QWidget):
         title_row = QHBoxLayout(); title = QLabel("MANUAL CONTROL"); title.setObjectName("pageTitle"); title_row.addWidget(title); title_row.addStretch()
         self.control_target = QLabel("NO CONTROL TARGET"); self.control_target.setObjectName("controlTarget"); title_row.addWidget(self.control_target); layout.addLayout(title_row)
         subtitle = QLabel("Joystick and keyboard control · WASD movement · Q/E rotation"); subtitle.setObjectName("muted"); layout.addWidget(subtitle)
-        options = CardWidget(); options.content.setDirection(QVBoxLayout.Direction.LeftToRight)
-        self.robot = QComboBox(); self.robot.addItems(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")); self.port = QComboBox(); self.port.setEditable(True); self.port.setMinimumWidth(140)
-        self.baud = QComboBox(); self.baud.setEditable(True); self.baud.addItems(["9600", "115200", "1000000"]); self.baud.setCurrentText(str(args.baud))
-        if args.port: self.port.setCurrentText(args.port)
-        for text, widget in (("ROBOT", self.robot), ("SERIAL PORT", self.port), ("BAUD RATE", self.baud)):
-            label = QLabel(text); label.setObjectName("cardTitle"); options.content.addWidget(label); options.content.addWidget(widget)
-        refresh = QPushButton("REFRESH"); refresh.clicked.connect(self.refresh_requested); options.content.addWidget(refresh); options.content.addStretch()
-        self.connect_button = QPushButton("CONNECT"); self.connect_button.setProperty("accent", True); self.connect_button.clicked.connect(self.connect_requested); options.content.addWidget(self.connect_button); layout.addWidget(options)
-
         body = QHBoxLayout(); body.setSpacing(18); joystick_card = CardWidget(); self.joystick_card = joystick_card; label = QLabel("TRANSLATION JOYSTICK"); label.setObjectName("section"); joystick_card.content.addWidget(label)
         joystick_row = QHBoxLayout(); self.joystick = JoystickWidget(); self.joystick.changed.connect(self._on_joystick); joystick_row.addWidget(self.joystick, 1, Qt.AlignmentFlag.AlignCenter)
         rotation_box = QVBoxLayout(); rotation_title = QLabel("ROTATION"); rotation_title.setObjectName("cardTitle"); rotation_box.addWidget(rotation_title)

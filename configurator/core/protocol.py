@@ -13,6 +13,8 @@ class Protocol:
     ROBOT_VELOCITY_VERSION = 1
     TELEMETRY_REQUEST_TYPE = 0xE0
     TELEMETRY_RESPONSE_TYPE = 0xE1
+    DISCOVERY_REQUEST_TYPE = 0xE2
+    DISCOVERY_RESPONSE_TYPE = 0xE3
     TELEMETRY_VERSION = 1
     TELEMETRY_FLAG_BASIC = 1 << 0
     TELEMETRY_FLAG_MOTORS = 1 << 1
@@ -21,6 +23,10 @@ class Protocol:
     TELEMETRY_FLAGS_FULL = 0x0F
     TELEMETRY_REPLY_WINDOW_S = 0.080
     TELEMETRY_RESPONSE_BASE_SIZE = 11
+    DISCOVERY_VERSION = 1
+    DISCOVERY_REQUEST_SIZE = 8
+    DISCOVERY_RESPONSE_FMT = "<HBBBH12sBBBBHH"
+    DISCOVERY_RESPONSE_SIZE = struct.calcsize(DISCOVERY_RESPONSE_FMT)
     CONFIG_DISCOVER_TYPE = 0xF0
     CONFIG_SET_ID_TYPE = 0xF1
     CONFIG_DISCOVER_RESPONSE_TYPE = 0xF2
@@ -66,6 +72,26 @@ class Protocol:
                               cls.TELEMETRY_VERSION, ord(robot_id), request_sequence & 0xFFFF,
                               flags & cls.TELEMETRY_FLAGS_FULL)
         return cls.with_crc(payload)
+
+    @classmethod
+    def encode_discovery_request(cls, request_sequence):
+        payload = struct.pack("<HBBH", 0xAA55, cls.DISCOVERY_REQUEST_TYPE,
+                              cls.DISCOVERY_VERSION, request_sequence & 0xFFFF)
+        return cls.with_crc(payload)
+
+    @classmethod
+    def parse_discovery_response(cls, frame):
+        if len(frame) != cls.DISCOVERY_RESPONSE_SIZE:
+            return None
+        values = struct.unpack(cls.DISCOVERY_RESPONSE_FMT, frame)
+        if (values[0] != 0xAA55 or values[1] != cls.DISCOVERY_RESPONSE_TYPE or
+                values[2] != cls.DISCOVERY_VERSION or cls.crc16(frame[:-2]) != values[-1]):
+            return None
+        return {"robot_id": chr(values[3]), "request_sequence": values[4],
+                "uid": values[5].hex().upper(),
+                "firmware_version": f"v{values[6]}.{values[7]}.{values[8]}",
+                "status": values[9], "battery_v": values[10] / 1000.0,
+                "received_at": time.monotonic()}
 
     @classmethod
     def encode_discovery(cls, nonce):
@@ -152,3 +178,15 @@ class Protocol:
                     responses.append(values)
                 start = rx.find(b"\x55\xAA")
         return responses, received
+
+    @classmethod
+    def parse_config_response(cls, frame):
+        if len(frame) != cls.CONFIG_RESPONSE_SIZE:
+            return None
+        values = struct.unpack(cls.CONFIG_RESPONSE_FMT, frame)
+        if (values[0] != 0xAA55 or cls.crc16(frame[:-2]) != values[-1] or
+                values[1] not in (cls.CONFIG_DISCOVER_RESPONSE_TYPE,
+                                  cls.CONFIG_SET_ID_RESPONSE_TYPE,
+                                  cls.CONFIG_SET_MOTION_RESPONSE_TYPE)):
+            return None
+        return values

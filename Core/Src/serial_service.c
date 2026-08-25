@@ -19,6 +19,8 @@
 #define RX_FRAME_LEN_MAX SERIAL_CONFIG_SET_MOTION_PACKET_LEN
 #define TELEMETRY_REQUEST_PACKET_LEN SERIAL_TELEMETRY_REQUEST_PACKET_LEN
 #define TELEMETRY_RESPONSE_PACKET_LEN_MAX SERIAL_TELEMETRY_RESPONSE_PACKET_LEN_MAX
+#define DISCOVERY_REQUEST_PACKET_LEN SERIAL_DISCOVERY_REQUEST_PACKET_LEN
+#define DISCOVERY_RESPONSE_PACKET_LEN SERIAL_DISCOVERY_RESPONSE_PACKET_LEN
 #define RX_SOF0 SERIAL_RX_SOF0
 #define RX_SOF1 SERIAL_RX_SOF1
 #define RX_TYPE_CONFIG_DISCOVER SERIAL_TYPE_CONFIG_DISCOVER
@@ -31,7 +33,10 @@
 #define RX_TYPE_ROBOT_VELOCITY SERIAL_TYPE_ROBOT_VELOCITY
 #define ROBOT_VELOCITY_PROTOCOL_VERSION SERIAL_ROBOT_VELOCITY_PROTOCOL_VERSION
 #define TX_TYPE_TELEMETRY_RESPONSE SERIAL_TYPE_TELEMETRY_RESPONSE
+#define RX_TYPE_DISCOVERY_REQUEST SERIAL_TYPE_DISCOVERY_REQUEST
+#define TX_TYPE_DISCOVERY_RESPONSE SERIAL_TYPE_DISCOVERY_RESPONSE
 #define TELEMETRY_PROTOCOL_VERSION SERIAL_TELEMETRY_PROTOCOL_VERSION
+#define DISCOVERY_PROTOCOL_VERSION SERIAL_DISCOVERY_PROTOCOL_VERSION
 #define TELEMETRY_FLAG_BASIC (1U << 0)
 #define TELEMETRY_FLAG_MOTORS (1U << 1)
 #define TELEMETRY_FLAG_BATTERY (1U << 2)
@@ -72,6 +77,9 @@ static uint32_t telemetry_due_tick = 0U;
 static uint16_t telemetry_request_sequence = 0U;
 static uint8_t telemetry_request_flags = 0U;
 static uint8_t telemetry_response_pending = 0U;
+static uint8_t discovery_response_pending = 0U;
+static uint16_t discovery_request_sequence = 0U;
+static uint32_t discovery_response_due_tick = 0U;
 static uint8_t telemetry_has_sent = 0U;
 static uint32_t config_response_due_tick = 0U;
 static uint8_t config_response_pending = 0U;
@@ -100,6 +108,7 @@ static void Serial_ProcessRx(void);
 static void Serial_ProcessByte(uint8_t b);
 static void Serial_ProcessCommandPacket(const uint8_t *buf);
 static void Serial_TelemetryTask(void);
+static void Serial_DiscoveryTask(void);
 static void Serial_ConfigResponseTask(void);
 static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_prio);
 static void Serial_TxKick(void);
@@ -108,6 +117,7 @@ static void Serial_ProcessDiscoverPacket(const uint8_t *buf);
 static void Serial_ProcessSetIdPacket(const uint8_t *buf);
 static void Serial_ProcessSetMotionPacket(const uint8_t *buf);
 static void Serial_ProcessTelemetryRequest(const uint8_t *buf);
+static void Serial_ProcessDiscoveryRequest(const uint8_t *buf);
 
 static void Serial_ProcessCommandPacket(const uint8_t *buf)
 {
@@ -327,6 +337,28 @@ static void Serial_ProcessTelemetryRequest(const uint8_t *buf)
   telemetry_response_pending = 1U;
 }
 
+static void Serial_ProcessDiscoveryRequest(const uint8_t *buf)
+{
+  const uint16_t crc_rx = U16LE(&buf[DISCOVERY_REQUEST_PACKET_LEN - 2U]);
+  const uint16_t crc_ok = Crc16CcittFalse(buf, DISCOVERY_REQUEST_PACKET_LEN - 2U);
+  if ((crc_rx != crc_ok) || (buf[3] != DISCOVERY_PROTOCOL_VERSION) ||
+      (live_robot_configured == 0U))
+  {
+    return;
+  }
+
+  uint8_t uid[ROBOT_UID_LEN];
+  RobotUidRead(uid);
+  discovery_request_sequence = U16LE(&buf[4]);
+  uint32_t slot_hash = (uint32_t)discovery_request_sequence ^ 0x7F4A7C15U;
+  for (uint8_t i = 0U; i < ROBOT_UID_LEN; i++)
+  {
+    slot_hash = (slot_hash ^ uid[i]) * 0x85EBCA6BU;
+  }
+  discovery_response_due_tick = HAL_GetTick() + ((slot_hash & 0x0FU) * 20U);
+  discovery_response_pending = 1U;
+}
+
 static void Serial_ProcessRx(void)
 {
   uint16_t pos = UART_RX_DMA_BUF_SIZE - __HAL_DMA_GET_COUNTER(serial_uart->hdmarx);
@@ -410,6 +442,10 @@ static void Serial_ProcessByte(uint8_t b)
         {
           expected_len = TELEMETRY_REQUEST_PACKET_LEN;
         }
+        else if (frame[2] == RX_TYPE_DISCOVERY_REQUEST)
+        {
+          expected_len = DISCOVERY_REQUEST_PACKET_LEN;
+        }
         else if (frame[2] == RX_TYPE_CONFIG_SET_MOTION)
         {
           expected_len = CONFIG_SET_MOTION_PACKET_LEN;
@@ -436,6 +472,10 @@ static void Serial_ProcessByte(uint8_t b)
         else if (frame[2] == RX_TYPE_TELEMETRY_REQUEST)
         {
           Serial_ProcessTelemetryRequest(frame);
+        }
+        else if (frame[2] == RX_TYPE_DISCOVERY_REQUEST)
+        {
+          Serial_ProcessDiscoveryRequest(frame);
         }
         else if (frame[2] == RX_TYPE_CONFIG_SET_MOTION)
         {
@@ -552,6 +592,7 @@ static void Serial_UartRecoveryTask(void)
   uart_tx_q_tail = 0U;
   uart_tx_q_count = 0U;
   telemetry_response_pending = 0U;
+  discovery_response_pending = 0U;
   if (primask == 0U)
   {
     __enable_irq();
@@ -643,6 +684,38 @@ static void Serial_TelemetryTask(void)
   }
 }
 
+static void Serial_DiscoveryTask(void)
+{
+  if ((discovery_response_pending == 0U) ||
+      ((int32_t)(HAL_GetTick() - discovery_response_due_tick) < 0))
+  {
+    return;
+  }
+
+  AppC_Telemetry telem;
+  AppC_GetTelemetry(&telem);
+  uint8_t frame[DISCOVERY_RESPONSE_PACKET_LEN] = {0U};
+  uint8_t uid[ROBOT_UID_LEN];
+  RobotUidRead(uid);
+  frame[0] = RX_SOF0;
+  frame[1] = RX_SOF1;
+  frame[2] = TX_TYPE_DISCOVERY_RESPONSE;
+  frame[3] = DISCOVERY_PROTOCOL_VERSION;
+  frame[4] = live_robot_id;
+  WriteU16LE(&frame[5], discovery_request_sequence);
+  memcpy(&frame[7], uid, ROBOT_UID_LEN);
+  frame[19] = SERIAL_FIRMWARE_VERSION_MAJOR;
+  frame[20] = SERIAL_FIRMWARE_VERSION_MINOR;
+  frame[21] = SERIAL_FIRMWARE_VERSION_PATCH;
+  frame[22] = (uint8_t)(1U | (uint8_t)(telem.fault_status << 1));
+  WriteU16LE(&frame[23], (uint16_t)(telem.battery_voltage_v * 1000.0f));
+  WriteU16LE(&frame[25], Crc16CcittFalse(frame, 25U));
+  if (Serial_QueueTx(frame, sizeof(frame), 0U) != 0U)
+  {
+    discovery_response_pending = 0U;
+  }
+}
+
 HAL_StatusTypeDef SerialService_Init(UART_HandleTypeDef *uart,
                                      DMA_HandleTypeDef *rx_dma)
 {
@@ -665,6 +738,7 @@ void SerialService_Task(void)
   Serial_UartRecoveryTask();
   Serial_ProcessRx();
   Serial_ConfigResponseTask();
+  Serial_DiscoveryTask();
   Serial_TelemetryTask();
 }
 

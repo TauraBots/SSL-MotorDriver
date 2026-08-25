@@ -14,6 +14,8 @@ from .telemetry import TelemetryHistory
 
 
 class SerialManager(QObject):
+    MAX_RX_READ_PER_TICK = 512
+    MAX_RX_BUFFER_SIZE = 4096
     connected = Signal(str, int, str)
     disconnected = Signal()
     telemetry_received = Signal(dict)
@@ -36,6 +38,7 @@ class SerialManager(QObject):
         self._timer.timeout.connect(self._tick)
         self._sequence = int(time.time() * 1000) & 0xFFFFFFFF
         self._request_sequence = 0
+        self._telemetry_sent_at = {}
         self._next_command = self._next_telemetry = 0.0
         self._last_motion = time.monotonic()
         self._last_telemetry = 0.0
@@ -59,9 +62,11 @@ class SerialManager(QObject):
 
     def connect_serial(self, port, baud, robot_id):
         self.disconnect_serial(send_brake=False)
+        candidate = None
         try:
-            self._serial = serial.Serial(port, baud, timeout=0)
-            self._serial.reset_input_buffer()
+            candidate = serial.Serial(port, baud, timeout=0, write_timeout=0.10)
+            candidate.reset_input_buffer()
+            self._serial = candidate
             self.state = RobotState(robot_id=robot_id, connected=True, port=port, baud=baud,
                                     communication_status="waiting")
             self._rx.clear(); self.history.clear(); self._request_sequence = 0
@@ -72,7 +77,14 @@ class SerialManager(QObject):
             self._timer.start()
             self.connected.emit(port, baud, robot_id)
         except Exception as exc:
+            if candidate is not None:
+                try:
+                    candidate.close()
+                except Exception:
+                    pass
             self._serial = None
+            self.state.connected = False
+            self.state.communication_status = "offline"
             self.error.emit(str(exc))
 
     def reconnect(self):
@@ -122,6 +134,7 @@ class SerialManager(QObject):
     def send_telemetry_request(self):
         if not self.is_connected: return
         self._request_sequence = (self._request_sequence + 1) & 0xFFFF
+        self._telemetry_sent_at[self._request_sequence] = time.monotonic()
         self._serial.write(Protocol.encode_telemetry_request(self.state.robot_id,
                                                              self._request_sequence))
 
@@ -150,18 +163,27 @@ class SerialManager(QObject):
             if now >= self._next_telemetry:
                 self.send_telemetry_request(); self._next_telemetry = now + 0.2
                 self._next_command = max(self._next_command, now + Protocol.TELEMETRY_REPLY_WINDOW_S)
-            waiting = self._serial.in_waiting
+            waiting = min(self._serial.in_waiting, self.MAX_RX_READ_PER_TICK)
             if waiting:
                 self._rx.extend(self._serial.read(waiting))
-                data = Protocol.parse_telemetry(self._rx, self.state.robot_id)
-                if data:
-                    self._last_telemetry = now; self._lost_emitted = False
-                    self.state.apply_telemetry(data); self.history.append(data)
-                    self.telemetry_received.emit(data)
+                if len(self._rx) > self.MAX_RX_BUFFER_SIZE:
+                    del self._rx[:-self.MAX_RX_BUFFER_SIZE]
+                self._consume_rx(now)
             if self._last_telemetry and now - self._last_telemetry > 1.0 and not self._lost_emitted:
                 self._lost_emitted = True; self.telemetry_lost.emit()
         except Exception as exc:
             self.disconnect_serial(send_brake=False); self.error.emit(str(exc))
+
+    def _consume_rx(self, now):
+        data = Protocol.parse_telemetry(self._rx, self.state.robot_id)
+        if not data: return
+        sent_at = self._telemetry_sent_at.pop(data["request_sequence"], None)
+        data["latency_ms"] = None if sent_at is None else max(0, int((now - sent_at) * 1000))
+        self._telemetry_sent_at = {seq: sent for seq, sent in self._telemetry_sent_at.items()
+                                   if now - sent < 2.0}
+        self._last_telemetry = now; self._lost_emitted = False
+        self.state.apply_telemetry(data); self.history.append(data)
+        self.telemetry_received.emit(data)
 
     def _configure_async(self, action, port, baud, **values):
         threading.Thread(target=self._configuration_worker,
@@ -179,7 +201,7 @@ class SerialManager(QObject):
 
     def _configuration_worker(self, action, port, baud, values):
         try:
-            with serial.Serial(port, baud, timeout=0.05) as config_port:
+            with serial.Serial(port, baud, timeout=0.05, write_timeout=0.10) as config_port:
                 time.sleep(0.25); config_port.reset_input_buffer()
                 if action == "discover":
                     replies, received = [], 0
