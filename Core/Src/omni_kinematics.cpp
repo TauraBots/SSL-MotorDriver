@@ -32,7 +32,8 @@ OmniKinematics::OmniKinematics(float wheelRadiusM, float robotRadiusM)
   BuildMatrices();
 }
 
-void OmniKinematics::RobotToWheels(float vx, float vy, float omega, float outW[4]) const
+void OmniKinematics::RobotToWheels(float vx, float vy, float omega,
+                                   float outW[4], float rawW[4]) const
 {
   if (outW == nullptr)
   {
@@ -43,6 +44,10 @@ void OmniKinematics::RobotToWheels(float vx, float vy, float omega, float outW[4
   {
     const float u = (t_[i][0] * vx) + (t_[i][1] * vy) + (t_[i][2] * omega);
     outW[i] = u / r_;
+    if (rawW != nullptr)
+    {
+      rawW[i] = outW[i];
+    }
   }
   float maxAbs = 0.0f;
 

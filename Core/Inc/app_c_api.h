@@ -48,6 +48,15 @@ typedef struct
   float m4;
 } AppC_WheelSpeeds;
 
+/* Temporary debugger instrumentation. Angular values use rad/s; wheel values
+ * and PID references/feedback use RPM. These fields do not affect control. */
+extern volatile float dbg_yaw_omega_cmd_rad_s;
+extern volatile float dbg_yaw_omega_limited_rad_s;
+extern volatile float dbg_yaw_wheel_raw_rpm[4];
+extern volatile float dbg_yaw_wheel_limited_rpm[4];
+extern volatile float dbg_yaw_pid_reference_rpm[4];
+extern volatile float dbg_yaw_feedback_rpm[4];
+
 void AppC_SetCommands(uint32_t sequence,
                       float m1, float m2, float m3, float m4,
                       uint8_t kick_power, uint8_t brake_mode);

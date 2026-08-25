@@ -16,8 +16,10 @@ public:
   // Rolling direction is tangential: theta_i = phi_i + 90 deg.
   OmniKinematics(float wheelRadiusM = 0.03f, float robotRadiusM = 0.09f);
 
-  // Robot -> wheels (rad/s), order: M1, M2, M3, M4
-  void RobotToWheels(float vx, float vy, float omega, float outW[4]) const;
+  // Robot -> wheels in rad/s. rawW, when provided, captures the values before
+  // the common 500 RPM wheel saturation. omega is always expressed in rad/s.
+  void RobotToWheels(float vx, float vy, float omega, float outW[4],
+                     float rawW[4] = nullptr) const;
 
   // Wheels -> robot
   OmniRobotTwist WheelsToRobot(const float wheelW[4]) const;

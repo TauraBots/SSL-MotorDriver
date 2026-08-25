@@ -15,6 +15,12 @@ volatile uint32_t live_comm_duplicate_packets = 0U;
 volatile uint32_t live_comm_stale_packets = 0U;
 volatile uint8_t live_comm_state = 0U;
 volatile uint8_t live_comm_kick_power = 0U;
+volatile float dbg_yaw_omega_cmd_rad_s = 0.0f;
+volatile float dbg_yaw_omega_limited_rad_s = 0.0f;
+volatile float dbg_yaw_wheel_raw_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+volatile float dbg_yaw_wheel_limited_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+volatile float dbg_yaw_pid_reference_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+volatile float dbg_yaw_feedback_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 }
 
 namespace
@@ -120,6 +126,14 @@ void EnterSafeState()
   g_desiredVy = 0.0f;
   g_desiredOmega = 0.0f;
   g_accelerationLimiter.Reset();
+  dbg_yaw_omega_cmd_rad_s = 0.0f;
+  dbg_yaw_omega_limited_rad_s = 0.0f;
+  for (uint8_t i = 0U; i < 4U; i++)
+  {
+    dbg_yaw_wheel_raw_rpm[i] = 0.0f;
+    dbg_yaw_wheel_limited_rpm[i] = 0.0f;
+    dbg_yaw_pid_reference_rpm[i] = 0.0f;
+  }
   if (g_app != nullptr)
   {
     g_app->ForceSafeOutputs();
@@ -182,16 +196,33 @@ extern "C" void AppC_FastTick1kHz(void)
     const LimitedRobotVelocity applied = g_accelerationLimiter.Update(
         g_desiredVx, g_desiredVy, g_desiredOmega, kControlDtS, braking);
     float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    g_kinematics.RobotToWheels(applied.vx, applied.vy, applied.omega, wheelRadS);
+    float wheelRawRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    g_kinematics.RobotToWheels(
+        applied.vx, applied.vy, applied.omega, wheelRadS, wheelRawRadS);
     setpoint_m1 = ClampSetpoint(wheelRadS[0] * kRadSToRpm);
     setpoint_m2 = ClampSetpoint(wheelRadS[1] * kRadSToRpm);
     setpoint_m3 = ClampSetpoint(wheelRadS[2] * kRadSToRpm);
     setpoint_m4 = ClampSetpoint(wheelRadS[3] * kRadSToRpm);
+    dbg_yaw_omega_cmd_rad_s = g_desiredOmega;
+    dbg_yaw_omega_limited_rad_s = applied.omega;
+    for (uint8_t i = 0U; i < 4U; i++)
+    {
+      dbg_yaw_wheel_raw_rpm[i] = wheelRawRadS[i] * kRadSToRpm;
+      dbg_yaw_wheel_limited_rpm[i] = wheelRadS[i] * kRadSToRpm;
+    }
+    dbg_yaw_pid_reference_rpm[0] = setpoint_m1;
+    dbg_yaw_pid_reference_rpm[1] = setpoint_m2;
+    dbg_yaw_pid_reference_rpm[2] = setpoint_m3;
+    dbg_yaw_pid_reference_rpm[3] = setpoint_m4;
   }
   if (g_app != nullptr)
   {
     g_app->FastTick1kHz();
   }
+  dbg_yaw_feedback_rpm[0] = rpm_m1;
+  dbg_yaw_feedback_rpm[1] = rpm_m2;
+  dbg_yaw_feedback_rpm[2] = rpm_m3;
+  dbg_yaw_feedback_rpm[3] = rpm_m4;
 }
 
 extern "C" void AppC_SetCommands(uint32_t sequence,
