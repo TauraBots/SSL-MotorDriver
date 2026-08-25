@@ -117,8 +117,12 @@ Requisicao:
 | `flags` | `uint8_t` | mascara solicitada |
 | `crc` | `uint16_t` | CRC16 dos 8 bytes anteriores |
 
-A resposta completa possui 42 bytes e e enviada por DMA apos turnaround de 3
-ms. O firmware limita respostas a no maximo 10 Hz.
+A resposta `0xE1` tem tamanho variável, é enviada exclusivamente por DMA após
+turnaround de 3 ms e nunca atualiza o watchdog de comandos. O firmware limita
+respostas a no máximo 10 Hz. Flags desconhecidas são removidas da máscara
+ecoada.
+
+Cabeçalho comum, presente em todas as respostas:
 
 | Campo | Tipo | Observacao |
 | --- | --- | --- |
@@ -126,25 +130,35 @@ ms. O firmware limita respostas a no maximo 10 Hz.
 | `type` | `uint8_t` | `0xE1` |
 | `version` | `uint8_t` | `1` |
 | `robot_id` | `uint8_t` | origem da resposta |
-| `flags` | `uint8_t` | eco da requisicao |
-| `status` | `uint8_t` | bit 0 válido; bits 1–4 falha dos encoders M1–M4; bit 5 subtensão |
 | `request_sequence` | `uint16_t` | eco da requisicao |
-| `time_ms` | `uint32_t` | tempo de `HAL_GetTick()` |
-| `command_sequence` | `uint32_t` | ultimo comando aceito |
-| `rpm1_x10` | `int16_t` | RPM de `M1` multiplicado por 10 |
-| `rpm2_x10` | `int16_t` | RPM de `M2` multiplicado por 10 |
-| `rpm3_x10` | `int16_t` | RPM de `M3` multiplicado por 10 |
-| `rpm4_x10` | `int16_t` | RPM de `M4` multiplicado por 10 |
-| `cmd1` | `int16_t` | comando interno de `M1` |
-| `cmd2` | `int16_t` | comando interno de `M2` |
-| `cmd3` | `int16_t` | comando interno de `M3` |
-| `cmd4` | `int16_t` | comando interno de `M4` |
-| `battery_mv` | `uint16_t` | tensao em milivolts |
-| `battery_adc` | `uint16_t` | leitura crua do ADC |
-| `brake` | `uint8_t` | `0` coast, `1` brake |
-| `communication_ok` | `uint8_t` | `1` OK, `0` LOST/sem comando |
-| `kick_power` | `uint8_t` | potencia do ultimo comando novo, `0..100` |
-| `crc` | `uint16_t` | CRC16-CCITT-FALSE |
+| `status` | `uint8_t` | bit 0 válido; bits 1–4 falha dos encoders M1–M4; bit 5 subtensão |
+| `flags` | `uint8_t` | máscara efetivamente incluída |
+
+Depois do cabeçalho, os grupos aparecem na ordem abaixo quando solicitados:
+
+| Flag | Valor | Conteúdo | Bytes |
+| --- | --- | --- | --- |
+| `BASIC` | `0x01` | `time_ms:u32`, `communication_ok:u8`, `brake:u8`, `kick_power:u8` | 7 |
+| `MOTORS` | `0x02` | `rpm1_x10..rpm4_x10:i16`, `cmd1..cmd4:i16` | 16 |
+| `BATTERY` | `0x04` | `battery_mv:u16`, `battery_adc:u16` | 4 |
+| `DIAGNOSTICS` | `0x08` | `crc_errors:u32`, `received_packets:u32`, `watchdog_ok:u8`, `last_command_sequence:u32` | 13 |
+
+O CRC16 ocupa os dois últimos bytes e cobre todo o frame anterior. Uma resposta
+sem grupos possui 11 bytes; `TELEMETRY_FLAG_FULL = 0x0F` produz 51 bytes.
+Solicitar somente `BATTERY`, por exemplo, produz 15 bytes e não transmite RPM
+nem diagnóstico.
+
+Exemplo de fluxo com `robot_id='C'` e `request_sequence=100`:
+
+```text
+Host  -> barramento: E0, C, sequence=100
+Robô C -> host:      E1, C, sequence=100
+Robôs A/B/D/E/F:     silêncio
+```
+
+ID diferente, ID inválido, broadcast `*`, versão desconhecida ou CRC inválido
+são ignorados sem resposta. Requisições de telemetria não alteram setpoints,
+PID, `sequence` de comando ou temporizador do watchdog.
 
 ## Mensagem de boot
 

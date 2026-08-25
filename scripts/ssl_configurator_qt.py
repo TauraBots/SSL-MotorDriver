@@ -312,10 +312,12 @@ class QtConfiguratorApp(QMainWindow):
             self.comm_label.setText("FALHA " + ",".join(names))
             self.comm_label.setStyleSheet("color:#ff6577")
         else:
-            self.comm_label.setText("OK" if telemetry["comm_ok"] else "LOST")
+            comm_ok = telemetry.get("comm_ok", telemetry.get("watchdog_ok", 0))
+            self.comm_label.setText("OK" if comm_ok else "LOST")
             self.comm_label.setStyleSheet("")
-        self.seq_label.setText(str(telemetry["command_sequence"])); self.battery_label.setText(f'{telemetry["battery_v"]:.2f} V')
-        for label, rpm in zip(self.rpm_labels, telemetry["rpm"]): label.setText(f"{rpm:+.0f}")
+        if "command_sequence" in telemetry: self.seq_label.setText(str(telemetry["command_sequence"]))
+        if "battery_v" in telemetry: self.battery_label.setText(f'{telemetry["battery_v"]:.2f} V')
+        for label, rpm in zip(self.rpm_labels, telemetry.get("rpm", ())): label.setText(f"{rpm:+.0f}")
         if self.log_writer: self.log_writer.writerow(self.b.telemetry_csv_row(telemetry)); self.log_file.flush()
 
     def toggle_log(self):

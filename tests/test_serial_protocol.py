@@ -13,6 +13,20 @@ SPEC.loader.exec_module(BACKEND)
 
 
 class SerialProtocolTests(unittest.TestCase):
+    @staticmethod
+    def telemetry_frame(flags, status=1):
+        frame = bytearray(struct.pack("<HBBBHBB", 0xAA55, 0xE1, 1, ord("A"), 7, status, flags))
+        if flags & BACKEND.TELEMETRY_FLAG_BASIC:
+            frame.extend(struct.pack("<IBBB", 1000, 1, 0, 60))
+        if flags & BACKEND.TELEMETRY_FLAG_MOTORS:
+            frame.extend(struct.pack("<hhhhhhhh", 100, 200, 300, 400, 1, 2, 3, 4))
+        if flags & BACKEND.TELEMETRY_FLAG_BATTERY:
+            frame.extend(struct.pack("<HH", 12000, 2048))
+        if flags & BACKEND.TELEMETRY_FLAG_DIAGNOSTICS:
+            frame.extend(struct.pack("<IIBI", 2, 30, 1, 22))
+        frame.extend(struct.pack("<H", BACKEND.crc16_ccitt_false(frame)))
+        return bytes(frame)
+
     def test_crc_known_vector(self):
         self.assertEqual(BACKEND.crc16_ccitt_false(b"123456789"), 0x29B1)
 
@@ -38,15 +52,32 @@ class SerialProtocolTests(unittest.TestCase):
 
     def test_telemetry_fault_bits_are_exposed(self):
         status = 1 | ((0x01 | 0x04 | 0x10) << 1)
-        values = (
-            0xAA55, 0xE1, 1, ord("A"), 0x0F, status, 7, 1000, 22,
-            100, 200, 300, 400, 1, 2, 3, 4, 12000, 2048, 0, 1, 0, 0,
-        )
-        payload = struct.pack(BACKEND.TELEMETRY_FMT, *values)
-        frame = payload[:-2] + struct.pack("<H", BACKEND.crc16_ccitt_false(payload[:-2]))
+        frame = self.telemetry_frame(BACKEND.TELEMETRY_FLAGS_FULL, status)
         telemetry = BACKEND.parse_telemetry(bytearray(frame), "A")
         self.assertEqual(telemetry["fault_status"], 0x15)
         self.assertEqual(telemetry["rpm"], (10.0, 20.0, 30.0, 40.0))
+
+    def test_telemetry_request_layout_and_flags(self):
+        frame = BACKEND.encode_telemetry_request("C", 100, BACKEND.TELEMETRY_FLAG_BATTERY)
+        self.assertEqual(len(frame), 10)
+        self.assertEqual(struct.unpack("<HBBBHBH", frame)[:-1],
+                         (0xAA55, 0xE0, 1, ord("C"), 100, BACKEND.TELEMETRY_FLAG_BATTERY))
+        self.assertEqual(struct.unpack_from("<H", frame, 8)[0], BACKEND.crc16_ccitt_false(frame[:8]))
+
+    def test_each_optional_group_is_independent(self):
+        cases = (
+            (BACKEND.TELEMETRY_FLAG_BASIC, {"time_ms", "comm_ok", "brake", "kick_power"}),
+            (BACKEND.TELEMETRY_FLAG_MOTORS, {"rpm", "cmd"}),
+            (BACKEND.TELEMETRY_FLAG_BATTERY, {"battery_v", "battery_adc"}),
+            (BACKEND.TELEMETRY_FLAG_DIAGNOSTICS,
+             {"crc_errors", "received_packets", "watchdog_ok", "command_sequence"}),
+        )
+        optional = set().union(*(keys for _, keys in cases))
+        for flag, expected in cases:
+            with self.subTest(flag=flag):
+                telemetry = BACKEND.parse_telemetry(bytearray(self.telemetry_frame(flag)), "A")
+                self.assertTrue(expected.issubset(telemetry))
+                self.assertFalse((optional - expected) & telemetry.keys())
 
 
 if __name__ == "__main__":

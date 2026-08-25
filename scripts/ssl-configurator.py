@@ -20,10 +20,13 @@ ROBOT_VELOCITY_VERSION = 1
 TELEMETRY_REQUEST_TYPE = 0xE0
 TELEMETRY_RESPONSE_TYPE = 0xE1
 TELEMETRY_VERSION = 1
+TELEMETRY_FLAG_BASIC = 1 << 0
+TELEMETRY_FLAG_MOTORS = 1 << 1
+TELEMETRY_FLAG_BATTERY = 1 << 2
+TELEMETRY_FLAG_DIAGNOSTICS = 1 << 3
 TELEMETRY_FLAGS_FULL = 0x0F
 TELEMETRY_REPLY_WINDOW_S = 0.080
-TELEMETRY_FMT = "<HBBBBBHIIhhhhhhhhHHBBBH"
-TELEMETRY_SIZE = struct.calcsize(TELEMETRY_FMT)
+TELEMETRY_RESPONSE_BASE_SIZE = 11
 CONFIG_DISCOVER_TYPE = 0xF0
 CONFIG_SET_ID_TYPE = 0xF1
 CONFIG_DISCOVER_RESPONSE_TYPE = 0xF2
@@ -145,10 +148,11 @@ def encode_robot_velocity_packet(robot_id: str, sequence: int, vx: float, vy: fl
     return payload + struct.pack("<H", crc16_ccitt_false(payload))
 
 
-def encode_telemetry_request(robot_id: str, request_sequence: int) -> bytes:
+def encode_telemetry_request(robot_id: str, request_sequence: int,
+                             flags: int = TELEMETRY_FLAGS_FULL) -> bytes:
     payload = struct.pack(
         "<HBBBHB", 0xAA55, TELEMETRY_REQUEST_TYPE, TELEMETRY_VERSION,
-        ord(robot_id), request_sequence & 0xFFFF, TELEMETRY_FLAGS_FULL
+        ord(robot_id), request_sequence & 0xFFFF, flags & TELEMETRY_FLAGS_FULL
     )
     return payload + struct.pack("<H", crc16_ccitt_false(payload))
 
@@ -159,37 +163,60 @@ def parse_telemetry(rx_buffer: bytearray, robot_id: str):
     while True:
         start = rx_buffer.find(marker)
         if start < 0:
-            if len(rx_buffer) > TELEMETRY_SIZE:
+            if len(rx_buffer) > TELEMETRY_RESPONSE_BASE_SIZE:
                 del rx_buffer[:-2]
             break
         if start > 0:
             del rx_buffer[:start]
-        if len(rx_buffer) < TELEMETRY_SIZE:
+        if len(rx_buffer) < 9:
             break
-        frame = bytes(rx_buffer[:TELEMETRY_SIZE])
-        del rx_buffer[:TELEMETRY_SIZE]
-        values = struct.unpack(TELEMETRY_FMT, frame)
-        if crc16_ccitt_false(frame[:-2]) != values[-1]:
+        flags = rx_buffer[8] & TELEMETRY_FLAGS_FULL
+        frame_size = TELEMETRY_RESPONSE_BASE_SIZE
+        frame_size += 7 if flags & TELEMETRY_FLAG_BASIC else 0
+        frame_size += 16 if flags & TELEMETRY_FLAG_MOTORS else 0
+        frame_size += 4 if flags & TELEMETRY_FLAG_BATTERY else 0
+        frame_size += 13 if flags & TELEMETRY_FLAG_DIAGNOSTICS else 0
+        if len(rx_buffer) < frame_size:
+            break
+        frame = bytes(rx_buffer[:frame_size])
+        crc_rx = struct.unpack_from("<H", frame, frame_size - 2)[0]
+        if crc16_ccitt_false(frame[:-2]) != crc_rx:
+            del rx_buffer[0]
             continue
-        if values[2] != TELEMETRY_VERSION or values[3] != ord(robot_id):
+        del rx_buffer[:frame_size]
+        if frame[3] != TELEMETRY_VERSION or frame[4] != ord(robot_id):
             continue
+        request_sequence = struct.unpack_from("<H", frame, 5)[0]
+        status = frame[7]
+        offset = 9
         latest = {
-            "robot_id": chr(values[3]),
-            "flags": values[4],
-            "status": values[5],
-            "fault_status": values[5] >> 1,
-            "request_sequence": values[6],
-            "time_ms": values[7],
-            "command_sequence": values[8],
-            "rpm": tuple(value / 10.0 for value in values[9:13]),
-            "cmd": tuple(values[13:17]),
-            "battery_v": values[17] / 1000.0,
-            "battery_adc": values[18],
-            "brake": values[19],
-            "comm_ok": values[20],
-            "kick_power": values[21],
+            "robot_id": chr(frame[4]),
+            "flags": flags,
+            "status": status,
+            "fault_status": status >> 1,
+            "request_sequence": request_sequence,
             "received_at": time.monotonic(),
         }
+        if flags & TELEMETRY_FLAG_BASIC:
+            latest["time_ms"] = struct.unpack_from("<I", frame, offset)[0]
+            offset += 4
+            latest["comm_ok"], latest["brake"], latest["kick_power"] = frame[offset:offset + 3]
+            offset += 3
+        if flags & TELEMETRY_FLAG_MOTORS:
+            motor_values = struct.unpack_from("<hhhhhhhh", frame, offset)
+            latest["rpm"] = tuple(value / 10.0 for value in motor_values[:4])
+            latest["cmd"] = tuple(motor_values[4:])
+            offset += 16
+        if flags & TELEMETRY_FLAG_BATTERY:
+            battery_mv, latest["battery_adc"] = struct.unpack_from("<HH", frame, offset)
+            latest["battery_v"] = battery_mv / 1000.0
+            offset += 4
+        if flags & TELEMETRY_FLAG_DIAGNOSTICS:
+            latest["crc_errors"], latest["received_packets"] = struct.unpack_from("<II", frame, offset)
+            offset += 8
+            latest["watchdog_ok"] = frame[offset]
+            offset += 1
+            latest["command_sequence"] = struct.unpack_from("<I", frame, offset)[0]
     return latest
 
 

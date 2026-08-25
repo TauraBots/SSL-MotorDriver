@@ -47,7 +47,7 @@
 #define CONFIG_RESPONSE_PACKET_LEN 23U
 #define RX_FRAME_LEN_MAX CONFIG_SET_ID_PACKET_LEN
 #define TELEMETRY_REQUEST_PACKET_LEN 10U
-#define TELEMETRY_RESPONSE_PACKET_LEN 42U
+#define TELEMETRY_RESPONSE_PACKET_LEN_MAX 51U
 #define RX_SOF0 0x55U
 #define RX_SOF1 0xAAU
 #define RX_TYPE_CONFIG_DISCOVER 0xF0U
@@ -59,6 +59,11 @@
 #define ROBOT_VELOCITY_PROTOCOL_VERSION 1U
 #define TX_TYPE_TELEMETRY_RESPONSE 0xE1U
 #define TELEMETRY_PROTOCOL_VERSION 1U
+#define TELEMETRY_FLAG_BASIC (1U << 0)
+#define TELEMETRY_FLAG_MOTORS (1U << 1)
+#define TELEMETRY_FLAG_BATTERY (1U << 2)
+#define TELEMETRY_FLAG_DIAGNOSTICS (1U << 3)
+#define TELEMETRY_FLAG_FULL 0x0FU
 #define TELEMETRY_MIN_INTERVAL_MS 100U
 #define TELEMETRY_TURNAROUND_MS 3U
 #define ROBOT_ID_BROADCAST ((uint8_t)'*')
@@ -221,35 +226,6 @@ volatile uint32_t live_robot_uid_word0 = 0U;
 volatile uint32_t live_robot_uid_word1 = 0U;
 volatile uint32_t live_robot_uid_word2 = 0U;
 
-typedef struct __attribute__((packed))
-{
-  uint16_t sof;
-  uint8_t type;
-  uint8_t version;
-  uint8_t robot_id;
-  uint8_t flags;
-  uint8_t status;
-  uint16_t request_sequence;
-  uint32_t time_ms;
-  uint32_t command_sequence;
-  int16_t rpm1_x10;
-  int16_t rpm2_x10;
-  int16_t rpm3_x10;
-  int16_t rpm4_x10;
-  int16_t cmd1;
-  int16_t cmd2;
-  int16_t cmd3;
-  int16_t cmd4;
-  uint16_t battery_mv;
-  uint16_t battery_adc;
-  uint8_t brake;
-  uint8_t communication_ok;
-  uint8_t kick_power;
-  uint16_t crc;
-} TelemetryResponseFrame;
-
-typedef char TelemetryResponseSizeMustBe42Bytes[(sizeof(TelemetryResponseFrame) == TELEMETRY_RESPONSE_PACKET_LEN) ? 1 : -1];
-
 static uint16_t Crc16CcittFalse(const uint8_t *data, uint16_t len)
 {
   uint16_t crc = 0xFFFFU;
@@ -405,6 +381,17 @@ static void WriteU32LE(uint8_t *p, uint32_t value)
   p[1] = (uint8_t)(value >> 8);
   p[2] = (uint8_t)(value >> 16);
   p[3] = (uint8_t)(value >> 24);
+}
+
+static void WriteU16LE(uint8_t *p, uint16_t value)
+{
+  p[0] = (uint8_t)value;
+  p[1] = (uint8_t)(value >> 8);
+}
+
+static void WriteI16LE(uint8_t *p, int16_t value)
+{
+  WriteU16LE(p, (uint16_t)value);
 }
 
 static int16_t I16LE(const uint8_t *p)
@@ -614,9 +601,14 @@ static void Serial_ProcessTelemetryRequest(const uint8_t *buf)
   const uint16_t crc_rx = U16LE(&buf[TELEMETRY_REQUEST_PACKET_LEN - 2U]);
   const uint16_t crc_ok = Crc16CcittFalse(buf, TELEMETRY_REQUEST_PACKET_LEN - 2U);
   const uint32_t now = HAL_GetTick();
-  if ((crc_rx != crc_ok) ||
-      (buf[3] != TELEMETRY_PROTOCOL_VERSION) ||
+  if (crc_rx != crc_ok)
+  {
+    serial_dbg_rx_bad_crc++;
+    return;
+  }
+  if ((buf[3] != TELEMETRY_PROTOCOL_VERSION) ||
       (live_robot_configured == 0U) ||
+      (RobotIdIsValid(buf[4]) == 0U) ||
       (buf[4] != live_robot_id) ||
       (telemetry_response_pending != 0U) ||
       ((telemetry_has_sent != 0U) && ((now - last_telemetry_tick) < TELEMETRY_MIN_INTERVAL_MS)))
@@ -626,6 +618,7 @@ static void Serial_ProcessTelemetryRequest(const uint8_t *buf)
 
   telemetry_request_sequence = U16LE(&buf[5]);
   telemetry_request_flags = buf[7];
+  serial_dbg_rx_frames++;
   telemetry_due_tick = now + TELEMETRY_TURNAROUND_MS;
   telemetry_response_pending = 1U;
 }
@@ -883,33 +876,57 @@ static void Serial_TelemetryTask(void)
 
   AppC_Telemetry telem;
   AppC_GetTelemetry(&telem);
-  TelemetryResponseFrame frame;
-  memset(&frame, 0, sizeof(frame));
-  frame.sof = TELEMETRY_SOF;
-  frame.type = TX_TYPE_TELEMETRY_RESPONSE;
-  frame.version = TELEMETRY_PROTOCOL_VERSION;
-  frame.robot_id = live_robot_id;
-  frame.flags = telemetry_request_flags;
-  frame.status = (uint8_t)(1U | (uint8_t)(telem.fault_status << 1));
-  frame.request_sequence = telemetry_request_sequence;
-  frame.time_ms = telem.time_ms;
-  frame.command_sequence = telem.last_command_sequence;
-  frame.rpm1_x10 = SaturateI16(telem.rpm_m1 * 10.0f);
-  frame.rpm2_x10 = SaturateI16(telem.rpm_m2 * 10.0f);
-  frame.rpm3_x10 = SaturateI16(telem.rpm_m3 * 10.0f);
-  frame.rpm4_x10 = SaturateI16(telem.rpm_m4 * 10.0f);
-  frame.cmd1 = (int16_t)telem.cmd_m1;
-  frame.cmd2 = (int16_t)telem.cmd_m2;
-  frame.cmd3 = (int16_t)telem.cmd_m3;
-  frame.cmd4 = (int16_t)telem.cmd_m4;
-  frame.battery_mv = (uint16_t)(telem.battery_voltage_v * 1000.0f);
-  frame.battery_adc = (uint16_t)telem.battery_adc_raw;
-  frame.brake = telem.stop_mode_brake;
-  frame.communication_ok = telem.communication_ok;
-  frame.kick_power = telem.kick_power;
-  frame.crc = Crc16CcittFalse((const uint8_t *)&frame, (uint16_t)(sizeof(frame) - sizeof(frame.crc)));
+  uint8_t frame[TELEMETRY_RESPONSE_PACKET_LEN_MAX] = {0U};
+  uint16_t len = 0U;
+  const uint8_t flags = telemetry_request_flags & TELEMETRY_FLAG_FULL;
+  frame[len++] = RX_SOF0;
+  frame[len++] = RX_SOF1;
+  frame[len++] = TX_TYPE_TELEMETRY_RESPONSE;
+  frame[len++] = TELEMETRY_PROTOCOL_VERSION;
+  frame[len++] = live_robot_id;
+  WriteU16LE(&frame[len], telemetry_request_sequence);
+  len += 2U;
+  frame[len++] = (uint8_t)(1U | (uint8_t)(telem.fault_status << 1));
+  frame[len++] = flags;
 
-  if (Serial_QueueTx((const uint8_t *)&frame, (uint16_t)sizeof(frame), 0U) != 0U)
+  if ((flags & TELEMETRY_FLAG_BASIC) != 0U)
+  {
+    WriteU32LE(&frame[len], telem.time_ms); len += 4U;
+    frame[len++] = telem.communication_ok;
+    frame[len++] = telem.stop_mode_brake;
+    frame[len++] = telem.kick_power;
+  }
+  if ((flags & TELEMETRY_FLAG_MOTORS) != 0U)
+  {
+    WriteI16LE(&frame[len], SaturateI16(telem.rpm_m1 * 10.0f)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16(telem.rpm_m2 * 10.0f)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16(telem.rpm_m3 * 10.0f)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16(telem.rpm_m4 * 10.0f)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16((float)telem.cmd_m1)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16((float)telem.cmd_m2)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16((float)telem.cmd_m3)); len += 2U;
+    WriteI16LE(&frame[len], SaturateI16((float)telem.cmd_m4)); len += 2U;
+  }
+  if ((flags & TELEMETRY_FLAG_BATTERY) != 0U)
+  {
+    WriteU16LE(&frame[len], (uint16_t)(telem.battery_voltage_v * 1000.0f));
+    len += 2U;
+    WriteU16LE(&frame[len], (uint16_t)telem.battery_adc_raw);
+    len += 2U;
+  }
+  if ((flags & TELEMETRY_FLAG_DIAGNOSTICS) != 0U)
+  {
+    WriteU32LE(&frame[len], serial_dbg_rx_bad_crc); len += 4U;
+    WriteU32LE(&frame[len], serial_dbg_rx_frames); len += 4U;
+    frame[len++] = telem.communication_ok;
+    WriteU32LE(&frame[len], telem.last_command_sequence); len += 4U;
+  }
+
+  const uint16_t crc = Crc16CcittFalse(frame, len);
+  WriteU16LE(&frame[len], crc);
+  len += 2U;
+
+  if (Serial_QueueTx(frame, len, 0U) != 0U)
   {
     last_telemetry_tick = now;
     telemetry_has_sent = 1U;

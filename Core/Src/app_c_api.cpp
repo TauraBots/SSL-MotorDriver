@@ -1,6 +1,7 @@
 #include "app_c_api.h"
 
 #include "app.hpp"
+#include "acceleration_limiter.hpp"
 #include "omni_kinematics.hpp"
 #include <cmath>
 
@@ -23,7 +24,14 @@ constexpr float kSetpointMaxRpm = 530.0f;
 constexpr float kWheelRadiusM = 0.03f;
 constexpr float kRobotRadiusM = 0.09f;
 constexpr float kRadSToRpm = 9.5492966f;
+constexpr float kControlDtS = 0.001f;
 constexpr uint32_t kCommunicationTimeoutMs = 150U;
+AccelerationLimiter g_accelerationLimiter;
+OmniKinematics g_kinematics(kWheelRadiusM, kRobotRadiusM);
+volatile float g_desiredVx = 0.0f;
+volatile float g_desiredVy = 0.0f;
+volatile float g_desiredOmega = 0.0f;
+volatile uint8_t g_cartesianCommand = 0U;
 uint32_t g_lastCommandSequence = 0U;
 uint32_t g_lastSequenceTick = 0U;
 uint8_t g_hasCommand = 0U;
@@ -65,6 +73,36 @@ inline bool IsAcceptableSequence(uint32_t sequence)
   return IsNewerSequence(sequence, g_lastCommandSequence);
 }
 
+bool AcceptCommandLocked(uint32_t sequence, uint8_t kickPower, uint8_t brakeMode)
+{
+  if (!IsAcceptableSequence(sequence))
+  {
+    live_comm_rejected_packets++;
+    if (sequence == g_lastCommandSequence)
+    {
+      live_comm_duplicate_packets++;
+    }
+    else
+    {
+      live_comm_stale_packets++;
+    }
+    return false;
+  }
+
+  g_lastCommandSequence = sequence;
+  g_lastSequenceTick = HAL_GetTick();
+  g_hasCommand = 1U;
+  g_communicationOk = 1U;
+  g_kickPower = (kickPower > 100U) ? 100U : kickPower;
+  stop_mode_brake = (brakeMode != 0U) ? 1U : 0U;
+  live_comm_last_sequence = sequence;
+  live_comm_age_ms = 0U;
+  live_comm_accepted_packets++;
+  live_comm_state = 1U;
+  live_comm_kick_power = g_kickPower;
+  return true;
+}
+
 void EnterSafeState()
 {
   const uint32_t primask = __get_PRIMASK();
@@ -78,6 +116,10 @@ void EnterSafeState()
   g_communicationOk = 0U;
   live_comm_state = 0U;
   live_comm_kick_power = 0U;
+  g_desiredVx = 0.0f;
+  g_desiredVy = 0.0f;
+  g_desiredOmega = 0.0f;
+  g_accelerationLimiter.Reset();
   if (g_app != nullptr)
   {
     g_app->ForceSafeOutputs();
@@ -132,6 +174,20 @@ extern "C" void AppC_Tick(void)
 
 extern "C" void AppC_FastTick1kHz(void)
 {
+  if ((g_cartesianCommand != 0U) && (g_communicationOk != 0U))
+  {
+    const bool braking = (stop_mode_brake != 0U) ||
+                         ((g_desiredVx == 0.0f) && (g_desiredVy == 0.0f) &&
+                          (g_desiredOmega == 0.0f));
+    const LimitedRobotVelocity applied = g_accelerationLimiter.Update(
+        g_desiredVx, g_desiredVy, g_desiredOmega, kControlDtS, braking);
+    float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    g_kinematics.RobotToWheels(applied.vx, applied.vy, applied.omega, wheelRadS);
+    setpoint_m1 = ClampSetpoint(wheelRadS[0] * kRadSToRpm);
+    setpoint_m2 = ClampSetpoint(wheelRadS[1] * kRadSToRpm);
+    setpoint_m3 = ClampSetpoint(wheelRadS[2] * kRadSToRpm);
+    setpoint_m4 = ClampSetpoint(wheelRadS[3] * kRadSToRpm);
+  }
   if (g_app != nullptr)
   {
     g_app->FastTick1kHz();
@@ -146,23 +202,11 @@ extern "C" void AppC_SetCommands(uint32_t sequence,
   const float newSetpointM2 = ClampSetpoint(m2);
   const float newSetpointM3 = ClampSetpoint(m3);
   const float newSetpointM4 = ClampSetpoint(m4);
-  const uint8_t newBrakeMode = (brake_mode != 0U) ? 1U : 0U;
-  const uint8_t newKickPower = (kick_power > 100U) ? 100U : kick_power;
-
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
 
-  if (!IsAcceptableSequence(sequence))
+  if (!AcceptCommandLocked(sequence, kick_power, brake_mode))
   {
-    live_comm_rejected_packets++;
-    if (sequence == g_lastCommandSequence)
-    {
-      live_comm_duplicate_packets++;
-    }
-    else
-    {
-      live_comm_stale_packets++;
-    }
     if (primask == 0U)
     {
       __enable_irq();
@@ -170,26 +214,12 @@ extern "C" void AppC_SetCommands(uint32_t sequence,
     return;
   }
 
-  g_lastCommandSequence = sequence;
-  g_lastSequenceTick = HAL_GetTick();
-  g_hasCommand = 1U;
-  g_communicationOk = 1U;
-  live_comm_last_sequence = sequence;
-  live_comm_age_ms = 0U;
-  live_comm_accepted_packets++;
-  live_comm_state = 1U;
+  g_cartesianCommand = 0U;
+  g_accelerationLimiter.Reset();
   setpoint_m1 = newSetpointM1;
   setpoint_m2 = newSetpointM2;
   setpoint_m3 = newSetpointM3;
   setpoint_m4 = newSetpointM4;
-  //cmd_m1 = static_cast<int32_t>(std::lround(setpoint_m1 * 10.0f));
-  //cmd_m2 = static_cast<int32_t>(std::lround(setpoint_m2 * 10.0f));
-  //cmd_m3 = static_cast<int32_t>(std::lround(setpoint_m3 * 10.0f));
-  //cmd_m4 = static_cast<int32_t>(std::lround(setpoint_m4 * 10.0f));
-  stop_mode_brake = newBrakeMode;
-  g_kickPower = newKickPower;
-  live_comm_kick_power = newKickPower;
-
   if (primask == 0U)
   {
     __enable_irq();
@@ -200,15 +230,19 @@ extern "C" void AppC_SetRobotVelocity(uint32_t sequence,
                                         float vx, float vy, float omega,
                                         uint8_t kick_power, uint8_t brake_mode)
 {
-  static const OmniKinematics kinematics(kWheelRadiusM, kRobotRadiusM);
-  float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  kinematics.RobotToWheels(vx, vy, omega, wheelRadS);
-  AppC_SetCommands(sequence,
-                   wheelRadS[0] * kRadSToRpm,
-                   wheelRadS[1] * kRadSToRpm,
-                   wheelRadS[2] * kRadSToRpm,
-                   wheelRadS[3] * kRadSToRpm,
-                   kick_power, brake_mode);
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (AcceptCommandLocked(sequence, kick_power, brake_mode))
+  {
+    g_desiredVx = vx;
+    g_desiredVy = vy;
+    g_desiredOmega = omega;
+    g_cartesianCommand = 1U;
+  }
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
 }
 
 extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)
