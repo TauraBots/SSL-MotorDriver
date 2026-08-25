@@ -4,10 +4,28 @@
 #include "omni_kinematics.hpp"
 #include <cmath>
 
+extern "C"
+{
+volatile uint32_t live_comm_last_sequence = 0U;
+volatile uint32_t live_comm_age_ms = 0U;
+volatile uint32_t live_comm_accepted_packets = 0U;
+volatile uint32_t live_comm_rejected_packets = 0U;
+volatile uint32_t live_comm_duplicate_packets = 0U;
+volatile uint32_t live_comm_stale_packets = 0U;
+volatile uint8_t live_comm_state = 0U;
+volatile uint8_t live_comm_kick_power = 0U;
+}
+
 namespace
 {
 App *g_app = nullptr;
 constexpr float kSetpointMaxRpm = 530.0f;
+constexpr uint32_t kCommunicationTimeoutMs = 150U;
+uint32_t g_lastCommandSequence = 0U;
+uint32_t g_lastSequenceTick = 0U;
+uint8_t g_hasCommand = 0U;
+uint8_t g_communicationOk = 0U;
+uint8_t g_kickPower = 0U;
 inline float ClampSetpoint(float x)
 {
   if (x > kSetpointMaxRpm)
@@ -19,6 +37,52 @@ inline float ClampSetpoint(float x)
     return -kSetpointMaxRpm;
   }
   return x;
+}
+
+inline bool IsNewerSequence(uint32_t sequence, uint32_t reference)
+{
+  const uint32_t delta = sequence - reference;
+  return (delta != 0U) && (delta < 0x80000000U);
+}
+
+inline bool IsAcceptableSequence(uint32_t sequence)
+{
+  if (g_hasCommand == 0U)
+  {
+    return true;
+  }
+
+  if (g_communicationOk == 0U)
+  {
+    // Allow a restarted transmitter to establish a new sequence epoch after
+    // timeout, while a frozen packet with the last sequence remains rejected.
+    return sequence != g_lastCommandSequence;
+  }
+
+  return IsNewerSequence(sequence, g_lastCommandSequence);
+}
+
+void EnterSafeState()
+{
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  setpoint_m1 = 0.0f;
+  setpoint_m2 = 0.0f;
+  setpoint_m3 = 0.0f;
+  setpoint_m4 = 0.0f;
+  stop_mode_brake = 1U;
+  g_kickPower = 0U;
+  g_communicationOk = 0U;
+  live_comm_state = 0U;
+  live_comm_kick_power = 0U;
+  if (g_app != nullptr)
+  {
+    g_app->ResetPidStates();
+  }
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
 }
 }
 
@@ -46,6 +110,7 @@ extern "C" void AppC_Init(ADC_HandleTypeDef *batteryAdc,
   static App app(context);
   g_app = &app;
   g_app->Init();
+  EnterSafeState();
 }
 
 extern "C" void AppC_Tick(void)
@@ -54,6 +119,12 @@ extern "C" void AppC_Tick(void)
   {
     g_app->Tick();
   }
+  if ((g_hasCommand != 0U) && (g_communicationOk != 0U) &&
+      ((HAL_GetTick() - g_lastSequenceTick) >= kCommunicationTimeoutMs))
+  {
+    EnterSafeState();
+  }
+  live_comm_age_ms = (g_hasCommand != 0U) ? (HAL_GetTick() - g_lastSequenceTick) : 0U;
 }
 
 extern "C" void AppC_FastTick1kHz(void)
@@ -64,17 +135,62 @@ extern "C" void AppC_FastTick1kHz(void)
   }
 }
 
-extern "C" void AppC_SetCommands(float m1, float m2, float m3, float m4, uint8_t brake_mode)
+extern "C" void AppC_SetCommands(uint32_t sequence,
+                                  float m1, float m2, float m3, float m4,
+                                  uint8_t kick_power, uint8_t brake_mode)
 {
-  setpoint_m1 = ClampSetpoint(m1);
-  setpoint_m2 = ClampSetpoint(m2);
-  setpoint_m3 = ClampSetpoint(m3);
-  setpoint_m4 = ClampSetpoint(m4);
+  const float newSetpointM1 = ClampSetpoint(m1);
+  const float newSetpointM2 = ClampSetpoint(m2);
+  const float newSetpointM3 = ClampSetpoint(m3);
+  const float newSetpointM4 = ClampSetpoint(m4);
+  const uint8_t newBrakeMode = (brake_mode != 0U) ? 1U : 0U;
+  const uint8_t newKickPower = (kick_power > 100U) ? 100U : kick_power;
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
+  if (!IsAcceptableSequence(sequence))
+  {
+    live_comm_rejected_packets++;
+    if (sequence == g_lastCommandSequence)
+    {
+      live_comm_duplicate_packets++;
+    }
+    else
+    {
+      live_comm_stale_packets++;
+    }
+    if (primask == 0U)
+    {
+      __enable_irq();
+    }
+    return;
+  }
+
+  g_lastCommandSequence = sequence;
+  g_lastSequenceTick = HAL_GetTick();
+  g_hasCommand = 1U;
+  g_communicationOk = 1U;
+  live_comm_last_sequence = sequence;
+  live_comm_age_ms = 0U;
+  live_comm_accepted_packets++;
+  live_comm_state = 1U;
+  setpoint_m1 = newSetpointM1;
+  setpoint_m2 = newSetpointM2;
+  setpoint_m3 = newSetpointM3;
+  setpoint_m4 = newSetpointM4;
   //cmd_m1 = static_cast<int32_t>(std::lround(setpoint_m1 * 10.0f));
   //cmd_m2 = static_cast<int32_t>(std::lround(setpoint_m2 * 10.0f));
   //cmd_m3 = static_cast<int32_t>(std::lround(setpoint_m3 * 10.0f));
   //cmd_m4 = static_cast<int32_t>(std::lround(setpoint_m4 * 10.0f));
-  stop_mode_brake = (brake_mode != 0U) ? 1U : 0U;
+  stop_mode_brake = newBrakeMode;
+  g_kickPower = newKickPower;
+  live_comm_kick_power = newKickPower;
+
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
 }
 
 extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)
@@ -90,12 +206,20 @@ extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)
   out->cmd_m3 = cmd_m3;
   out->cmd_m4 = cmd_m4;
   out->stop_mode_brake = stop_mode_brake;
+  out->last_command_sequence = g_lastCommandSequence;
+  out->communication_ok = g_communicationOk;
+  out->kick_power = g_kickPower;
   out->rpm_m1 = rpm_m1;
   out->rpm_m2 = rpm_m2;
   out->rpm_m3 = rpm_m3;
   out->rpm_m4 = rpm_m4;
   out->battery_adc_raw = battery_adc_raw;
   out->battery_voltage_v = battery_voltage_v;
+}
+
+extern "C" void AppC_ForceSafeState(void)
+{
+  EnterSafeState();
 }
 
 extern "C" void AppC_RobotToWheels(float vx, float vy, float omega,

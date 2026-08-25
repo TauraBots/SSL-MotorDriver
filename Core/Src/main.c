@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_c_api.h"
+#include "stm32f1xx_hal_flash_ex.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,15 +39,31 @@
 #define UART_RX_DMA_BUF_SIZE 256U
 #define UART_TX_BUF_SIZE 192U
 #define UART_TX_QUEUE_DEPTH 8U
-#define TELEMETRY_PERIOD_MS 1U
 #define TELEMETRY_SOF 0xAA55U
-#define RX_FRAME_LEN_ROBOT_VEL 20U
-#define RX_FRAME_LEN_FIELD_VEL 24U
-#define RX_FRAME_LEN_MAX RX_FRAME_LEN_FIELD_VEL
+#define COMMAND_PACKET_LEN 19U
+#define CONFIG_DISCOVER_PACKET_LEN 9U
+#define CONFIG_SET_ID_PACKET_LEN 22U
+#define CONFIG_RESPONSE_PACKET_LEN 23U
+#define RX_FRAME_LEN_MAX CONFIG_SET_ID_PACKET_LEN
+#define TELEMETRY_REQUEST_PACKET_LEN 10U
+#define TELEMETRY_RESPONSE_PACKET_LEN 42U
 #define RX_SOF0 0x55U
 #define RX_SOF1 0xAAU
-#define RX_TYPE_VEL 0x01U
-#define RX_TYPE_FIELD_VEL 0x02U
+#define RX_TYPE_CONFIG_DISCOVER 0xF0U
+#define RX_TYPE_CONFIG_SET_ID 0xF1U
+#define TX_TYPE_CONFIG_DISCOVER_RESPONSE 0xF2U
+#define TX_TYPE_CONFIG_SET_ID_RESPONSE 0xF3U
+#define RX_TYPE_TELEMETRY_REQUEST 0xE0U
+#define TX_TYPE_TELEMETRY_RESPONSE 0xE1U
+#define TELEMETRY_PROTOCOL_VERSION 1U
+#define TELEMETRY_MIN_INTERVAL_MS 100U
+#define TELEMETRY_TURNAROUND_MS 3U
+#define ROBOT_ID_BROADCAST ((uint8_t)'*')
+#define ROBOT_CONFIG_ADDRESS 0x0803F800U
+#define ROBOT_CONFIG_MAGIC 0x54425549U
+#define ROBOT_CONFIG_VERSION 1U
+#define ROBOT_CONFIG_KEY 0x46434449U
+#define ROBOT_UID_LEN 12U
 
 /* USER CODE END PD */
 
@@ -82,7 +99,18 @@ static uint8_t uart_tx_q_head = 0U;
 static uint8_t uart_tx_q_tail = 0U;
 static uint8_t uart_tx_q_count = 0U;
 static volatile uint8_t uart_tx_busy = 0U;
+static volatile uint8_t uart_recovery_pending = 0U;
+static volatile uint32_t uart_error_count = 0U;
 static uint32_t last_telemetry_tick = 0U;
+static uint32_t telemetry_due_tick = 0U;
+static uint16_t telemetry_request_sequence = 0U;
+static uint8_t telemetry_request_flags = 0U;
+static uint8_t telemetry_response_pending = 0U;
+static uint8_t telemetry_has_sent = 0U;
+static uint32_t config_response_due_tick = 0U;
+static uint8_t config_response_pending = 0U;
+static uint8_t config_response_type = 0U;
+static uint8_t config_response_status = 0U;
 
 static volatile float vx = 0.0f;
 static volatile float vy = 0.0f;
@@ -125,14 +153,24 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 static void Serial_ProcessRx(void);
 static void Serial_ProcessByte(uint8_t b);
-static void Serial_ProcessVelFrame(const uint8_t *buf, uint8_t len);
+static void Serial_ProcessCommandPacket(const uint8_t *buf);
 static void Serial_TelemetryTask(void);
+static void Serial_ConfigResponseTask(void);
 static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_prio);
 static void Serial_TxKick(void);
-static uint8_t TelemetryChecksum(const uint8_t *data, uint16_t len);
+static void Serial_UartRecoveryTask(void);
 static uint16_t Crc16CcittFalse(const uint8_t *data, uint16_t len);
 static uint16_t U16LE(const uint8_t *p);
-static float ReadFloatLE(const uint8_t *p);
+static uint32_t U32LE(const uint8_t *p);
+static void WriteU32LE(uint8_t *p, uint32_t value);
+static int16_t I16LE(const uint8_t *p);
+static void RobotConfig_Init(void);
+static uint8_t RobotConfig_SetId(uint8_t robot_id);
+static void RobotUidRead(uint8_t uid[ROBOT_UID_LEN]);
+static void Serial_ProcessDiscoverPacket(const uint8_t *buf);
+static void Serial_ProcessSetIdPacket(const uint8_t *buf);
+static void Serial_ProcessTelemetryRequest(const uint8_t *buf);
+static uint32_t Crc32Ieee(const uint8_t *data, uint16_t len);
 
 /* USER CODE END PFP */
 
@@ -140,9 +178,61 @@ static float ReadFloatLE(const uint8_t *p);
 /* USER CODE BEGIN 0 */
 typedef struct __attribute__((packed))
 {
+  uint16_t header;
+  uint8_t robot_id;
+  uint32_t sequence;
+  int16_t motor1;
+  int16_t motor2;
+  int16_t motor3;
+  int16_t motor4;
+  uint8_t kick_power;
+  uint8_t brake;
+  uint16_t crc;
+} CommandPacket;
+
+typedef char CommandPacketSizeMustBe19Bytes[(sizeof(CommandPacket) == COMMAND_PACKET_LEN) ? 1 : -1];
+
+typedef struct __attribute__((packed))
+{
+  uint32_t magic;
+  uint16_t version;
+  uint16_t size;
+  uint8_t robot_id;
+  uint8_t configured;
+  uint8_t reserved[2];
+  uint32_t generation;
+  uint32_t crc32;
+} RobotConfig;
+
+typedef char RobotConfigSizeMustBe20Bytes[(sizeof(RobotConfig) == 20U) ? 1 : -1];
+
+static const RobotConfig kDefaultRobotConfig = {
+    ROBOT_CONFIG_MAGIC,
+    ROBOT_CONFIG_VERSION,
+    sizeof(RobotConfig),
+    0U,
+    0U,
+    {0U, 0U},
+    0U,
+    0U};
+
+volatile uint8_t live_robot_id = 0U;
+volatile uint8_t live_robot_configured = 0U;
+volatile uint32_t live_robot_uid_word0 = 0U;
+volatile uint32_t live_robot_uid_word1 = 0U;
+volatile uint32_t live_robot_uid_word2 = 0U;
+
+typedef struct __attribute__((packed))
+{
   uint16_t sof;
-  uint16_t seq;
+  uint8_t type;
+  uint8_t version;
+  uint8_t robot_id;
+  uint8_t flags;
+  uint8_t status;
+  uint16_t request_sequence;
   uint32_t time_ms;
+  uint32_t command_sequence;
   int16_t rpm1_x10;
   int16_t rpm2_x10;
   int16_t rpm3_x10;
@@ -154,18 +244,12 @@ typedef struct __attribute__((packed))
   uint16_t battery_mv;
   uint16_t battery_adc;
   uint8_t brake;
-  uint8_t crc8;
-} TelemetryFrame;
+  uint8_t communication_ok;
+  uint8_t kick_power;
+  uint16_t crc;
+} TelemetryResponseFrame;
 
-static uint8_t TelemetryChecksum(const uint8_t *data, uint16_t len)
-{
-  uint8_t c = 0U;
-  for (uint16_t i = 0U; i < len; i++)
-  {
-    c ^= data[i];
-  }
-  return c;
-}
+typedef char TelemetryResponseSizeMustBe42Bytes[(sizeof(TelemetryResponseFrame) == TELEMETRY_RESPONSE_PACKET_LEN) ? 1 : -1];
 
 static uint16_t Crc16CcittFalse(const uint8_t *data, uint16_t len)
 {
@@ -188,35 +272,150 @@ static uint16_t Crc16CcittFalse(const uint8_t *data, uint16_t len)
   return crc;
 }
 
+static uint8_t RobotIdIsValid(uint8_t robot_id)
+{
+  return ((robot_id >= (uint8_t)'A') && (robot_id <= (uint8_t)'Z')) ? 1U : 0U;
+}
+
+static uint32_t Crc32Ieee(const uint8_t *data, uint16_t len)
+{
+  uint32_t crc = 0xFFFFFFFFU;
+  for (uint16_t i = 0U; i < len; i++)
+  {
+    crc ^= data[i];
+    for (uint8_t bit = 0U; bit < 8U; bit++)
+    {
+      crc = ((crc & 1U) != 0U) ? ((crc >> 1) ^ 0xEDB88320U) : (crc >> 1);
+    }
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+static void RobotUidRead(uint8_t uid[ROBOT_UID_LEN])
+{
+  memcpy(uid, (const void *)UID_BASE, ROBOT_UID_LEN);
+}
+
+static void RobotConfig_Init(void)
+{
+  uint8_t uid[ROBOT_UID_LEN];
+  RobotUidRead(uid);
+  live_robot_uid_word0 = U32LE(&uid[0]);
+  live_robot_uid_word1 = U32LE(&uid[4]);
+  live_robot_uid_word2 = U32LE(&uid[8]);
+
+  RobotConfig config = kDefaultRobotConfig;
+  memcpy(&config, (const void *)ROBOT_CONFIG_ADDRESS, sizeof(config));
+  const uint32_t crc = Crc32Ieee((const uint8_t *)&config, (uint16_t)(sizeof(config) - sizeof(config.crc32)));
+  if ((config.magic == ROBOT_CONFIG_MAGIC) &&
+      (config.version == ROBOT_CONFIG_VERSION) &&
+      (config.size == sizeof(RobotConfig)) &&
+      (config.configured == 1U) &&
+      (RobotIdIsValid(config.robot_id) != 0U) &&
+      (config.crc32 == crc))
+  {
+    live_robot_id = config.robot_id;
+    live_robot_configured = 1U;
+  }
+}
+
+static uint8_t RobotConfig_SetId(uint8_t robot_id)
+{
+  if (RobotIdIsValid(robot_id) == 0U)
+  {
+    return 0U;
+  }
+
+  RobotConfig config = kDefaultRobotConfig;
+  config.robot_id = robot_id;
+  config.configured = 1U;
+
+  RobotConfig old_config;
+  memcpy(&old_config, (const void *)ROBOT_CONFIG_ADDRESS, sizeof(old_config));
+  const uint32_t old_crc = Crc32Ieee((const uint8_t *)&old_config, (uint16_t)(sizeof(old_config) - sizeof(old_config.crc32)));
+  if ((old_config.magic == ROBOT_CONFIG_MAGIC) &&
+      (old_config.version == ROBOT_CONFIG_VERSION) &&
+      (old_config.size == sizeof(RobotConfig)) &&
+      (old_config.crc32 == old_crc))
+  {
+    config.generation = old_config.generation + 1U;
+  }
+  else
+  {
+    config.generation = 1U;
+  }
+  config.crc32 = Crc32Ieee((const uint8_t *)&config, (uint16_t)(sizeof(config) - sizeof(config.crc32)));
+
+  FLASH_EraseInitTypeDef erase = {0};
+  uint32_t page_error = 0U;
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.PageAddress = ROBOT_CONFIG_ADDRESS;
+  erase.NbPages = 1U;
+
+  if (HAL_FLASH_Unlock() != HAL_OK)
+  {
+    return 0U;
+  }
+  if (HAL_FLASHEx_Erase(&erase, &page_error) != HAL_OK)
+  {
+    (void)HAL_FLASH_Lock();
+    return 0U;
+  }
+
+  for (uint32_t i = 0U; i < (sizeof(config) / sizeof(uint16_t)); i++)
+  {
+    const uint16_t halfword = U16LE(&((const uint8_t *)&config)[i * sizeof(uint16_t)]);
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,
+                          ROBOT_CONFIG_ADDRESS + (i * sizeof(uint16_t)),
+                          halfword) != HAL_OK)
+    {
+      (void)HAL_FLASH_Lock();
+      return 0U;
+    }
+  }
+  (void)HAL_FLASH_Lock();
+
+  RobotConfig verify;
+  memcpy(&verify, (const void *)ROBOT_CONFIG_ADDRESS, sizeof(verify));
+  if (memcmp(&verify, &config, sizeof(config)) != 0)
+  {
+    return 0U;
+  }
+
+  live_robot_id = robot_id;
+  live_robot_configured = 1U;
+  return 1U;
+}
+
 static uint16_t U16LE(const uint8_t *p)
 {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static float ReadFloatLE(const uint8_t *p)
+static uint32_t U32LE(const uint8_t *p)
 {
-  float value = 0.0f;
-  memcpy(&value, p, sizeof(float));
-  return value;
+  return (uint32_t)p[0] |
+         ((uint32_t)p[1] << 8) |
+         ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
 }
 
-static void Serial_ProcessVelFrame(const uint8_t *buf, uint8_t len)
+static void WriteU32LE(uint8_t *p, uint32_t value)
 {
-  const uint8_t type = buf[2];
-  if (((type == RX_TYPE_VEL) && (len != RX_FRAME_LEN_ROBOT_VEL)) ||
-      ((type == RX_TYPE_FIELD_VEL) && (len != RX_FRAME_LEN_FIELD_VEL)))
-  {
-    serial_dbg_rx_bad_type++;
-    return;
-  }
+  p[0] = (uint8_t)value;
+  p[1] = (uint8_t)(value >> 8);
+  p[2] = (uint8_t)(value >> 16);
+  p[3] = (uint8_t)(value >> 24);
+}
 
-  if ((type != RX_TYPE_VEL) && (type != RX_TYPE_FIELD_VEL))
-  {
-    serial_dbg_rx_bad_type++;
-    return;
-  }
+static int16_t I16LE(const uint8_t *p)
+{
+  return (int16_t)U16LE(p);
+}
 
-  const uint16_t crc_offset = (uint16_t)(len - 2U);
+static void Serial_ProcessCommandPacket(const uint8_t *buf)
+{
+  const uint16_t crc_offset = COMMAND_PACKET_LEN - 2U;
   const uint16_t crc_rx = U16LE(&buf[crc_offset]);
   const uint16_t crc_ok = Crc16CcittFalse(buf, crc_offset);
   serial_dbg_crc_rx = crc_rx;
@@ -227,68 +426,148 @@ static void Serial_ProcessVelFrame(const uint8_t *buf, uint8_t len)
     return;
   }
 
-  float vx = ReadFloatLE(&buf[6]);
-  float vy = ReadFloatLE(&buf[10]);
-  float w = ReadFloatLE(&buf[14]);
-
-  if (type == RX_TYPE_FIELD_VEL)
+  serial_dbg_rx_frames++;
+  const uint8_t robot_id = buf[2];
+  if ((live_robot_configured == 0U) ||
+      ((robot_id != live_robot_id) && (robot_id != ROBOT_ID_BROADCAST)))
   {
-    const float yaw = ReadFloatLE(&buf[18]);
-    const float c = cosf(yaw);
-    const float s = sinf(yaw);
-    const float vx_field = vx;
-    const float vy_field = vy;
-
-    // Field-relative command -> robot-relative command.
-    // yaw is the robot frame angle in the field frame, positive CCW.
-    vx = (c * vx_field) + (s * vy_field);
-    vy = (-s * vx_field) + (c * vy_field);
+    return;
   }
 
-  serial_dbg_rx_vx = vx;
-  serial_dbg_rx_vy = vy;
-  serial_dbg_rx_omega = w;
-  serial_dbg_rx_frames++;
+  const uint32_t sequence = U32LE(&buf[3]);
+  const int16_t motor1 = I16LE(&buf[7]);
+  const int16_t motor2 = I16LE(&buf[9]);
+  const int16_t motor3 = I16LE(&buf[11]);
+  const int16_t motor4 = I16LE(&buf[13]);
+  const uint8_t kick_power = buf[15];
+  const uint8_t brake_mode = buf[16];
 
-  AppC_WheelSpeeds wheels;
-  AppC_RobotToWheels(
-      vx,
-      vy,
-      w,
-      0.03f,
-      0.09f,
-      &wheels);
-
-  float applied_vx = 0.0f;
-  float applied_vy = 0.0f;
-  float applied_w  = 0.0f;
-
-  AppC_WheelsToRobot(
-      &wheels,
-      0.03f,
-      0.09f,
-      &applied_vx,
-      &applied_vy,
-      &applied_w);
-
-  const float radps_to_rpm = 9.5492966f;
-
-  dbg_wheel_m1_rpm = wheels.m1 * radps_to_rpm;
-  dbg_wheel_m2_rpm = wheels.m2 * radps_to_rpm;
-  dbg_wheel_m3_rpm = wheels.m3 * radps_to_rpm;
-  dbg_wheel_m4_rpm = wheels.m4 * radps_to_rpm;
-
-  serial_dbg_applied_vx = applied_vx;
-  serial_dbg_applied_vy = applied_vy;
-  serial_dbg_applied_omega = applied_w;
-
-  const uint8_t brake_mode = ((fabsf(vx) < 1.0e-4f) && (fabsf(vy) < 1.0e-4f) && (fabsf(w) < 1.0e-4f)) ? 1U : 0U;
+  dbg_wheel_m1_rpm = (float)motor1;
+  dbg_wheel_m2_rpm = (float)motor2;
+  dbg_wheel_m3_rpm = (float)motor3;
+  dbg_wheel_m4_rpm = (float)motor4;
   AppC_SetCommands(
-      wheels.m1 * radps_to_rpm,
-      wheels.m2 * radps_to_rpm,
-      wheels.m3 * radps_to_rpm,
-      wheels.m4 * radps_to_rpm,
-      brake_mode);
+      sequence,
+      (float)motor1, (float)motor2, (float)motor3, (float)motor4,
+      kick_power, brake_mode);
+}
+
+static uint32_t RobotConfigGeneration(void)
+{
+  if (live_robot_configured == 0U)
+  {
+    return 0U;
+  }
+  RobotConfig config;
+  memcpy(&config, (const void *)ROBOT_CONFIG_ADDRESS, sizeof(config));
+  return config.generation;
+}
+
+static uint8_t Serial_SendConfigResponse(uint8_t type, uint8_t status)
+{
+  uint8_t response[CONFIG_RESPONSE_PACKET_LEN] = {0};
+  uint8_t uid[ROBOT_UID_LEN];
+  RobotUidRead(uid);
+  response[0] = RX_SOF0;
+  response[1] = RX_SOF1;
+  response[2] = type;
+  memcpy(&response[3], uid, ROBOT_UID_LEN);
+  response[15] = status;
+  response[16] = live_robot_id;
+  WriteU32LE(&response[17], RobotConfigGeneration());
+  const uint16_t crc = Crc16CcittFalse(response, CONFIG_RESPONSE_PACKET_LEN - 2U);
+  response[21] = (uint8_t)crc;
+  response[22] = (uint8_t)(crc >> 8);
+  if ((uart_tx_busy != 0U) || (uart_tx_q_count != 0U))
+  {
+    return 0U;
+  }
+
+  return (HAL_UART_Transmit(&huart2, response, sizeof(response), 40U) == HAL_OK) ? 1U : 0U;
+}
+
+static void Serial_ProcessDiscoverPacket(const uint8_t *buf)
+{
+  const uint16_t crc_rx = U16LE(&buf[CONFIG_DISCOVER_PACKET_LEN - 2U]);
+  const uint16_t crc_ok = Crc16CcittFalse(buf, CONFIG_DISCOVER_PACKET_LEN - 2U);
+  if (crc_rx != crc_ok)
+  {
+    return;
+  }
+
+  uint8_t uid[ROBOT_UID_LEN];
+  RobotUidRead(uid);
+  const uint32_t nonce = U32LE(&buf[3]);
+  uint32_t slot_hash = nonce ^ 0x9E3779B9U;
+  for (uint8_t i = 0U; i < ROBOT_UID_LEN; i++)
+  {
+    slot_hash ^= uid[i];
+    slot_hash *= 0x85EBCA6BU;
+    slot_hash ^= slot_hash >> 13;
+  }
+  const uint32_t response_slot = slot_hash & 0x1FU;
+  config_response_type = TX_TYPE_CONFIG_DISCOVER_RESPONSE;
+  config_response_status = live_robot_configured;
+  config_response_due_tick = HAL_GetTick() + (response_slot * 30U);
+  config_response_pending = 1U;
+}
+
+static void Serial_ProcessSetIdPacket(const uint8_t *buf)
+{
+  const uint16_t crc_rx = U16LE(&buf[CONFIG_SET_ID_PACKET_LEN - 2U]);
+  const uint16_t crc_ok = Crc16CcittFalse(buf, CONFIG_SET_ID_PACKET_LEN - 2U);
+  uint8_t uid[ROBOT_UID_LEN];
+  RobotUidRead(uid);
+  if ((crc_rx != crc_ok) || (memcmp(&buf[3], uid, ROBOT_UID_LEN) != 0) ||
+      (U32LE(&buf[16]) != ROBOT_CONFIG_KEY))
+  {
+    return;
+  }
+
+  uint8_t saved = 0U;
+  AppC_ForceSafeState();
+  saved = RobotConfig_SetId(buf[15]);
+  config_response_type = TX_TYPE_CONFIG_SET_ID_RESPONSE;
+  config_response_status = saved;
+  config_response_due_tick = HAL_GetTick();
+  config_response_pending = 1U;
+}
+
+static void Serial_ConfigResponseTask(void)
+{
+  if ((config_response_pending == 0U) ||
+      ((int32_t)(HAL_GetTick() - config_response_due_tick) < 0))
+  {
+    return;
+  }
+
+  const uint8_t type = config_response_type;
+  const uint8_t status = config_response_status;
+  if (Serial_SendConfigResponse(type, status) != 0U)
+  {
+    config_response_pending = 0U;
+  }
+}
+
+static void Serial_ProcessTelemetryRequest(const uint8_t *buf)
+{
+  const uint16_t crc_rx = U16LE(&buf[TELEMETRY_REQUEST_PACKET_LEN - 2U]);
+  const uint16_t crc_ok = Crc16CcittFalse(buf, TELEMETRY_REQUEST_PACKET_LEN - 2U);
+  const uint32_t now = HAL_GetTick();
+  if ((crc_rx != crc_ok) ||
+      (buf[3] != TELEMETRY_PROTOCOL_VERSION) ||
+      (live_robot_configured == 0U) ||
+      (buf[4] != live_robot_id) ||
+      (telemetry_response_pending != 0U) ||
+      ((telemetry_has_sent != 0U) && ((now - last_telemetry_tick) < TELEMETRY_MIN_INTERVAL_MS)))
+  {
+    return;
+  }
+
+  telemetry_request_sequence = U16LE(&buf[5]);
+  telemetry_request_flags = buf[7];
+  telemetry_due_tick = now + TELEMETRY_TURNAROUND_MS;
+  telemetry_response_pending = 1U;
 }
 
 static void Serial_ProcessRx(void)
@@ -327,7 +606,7 @@ static void Serial_ProcessByte(uint8_t b)
   serial_dbg_rx_bytes++;
   static uint8_t frame[RX_FRAME_LEN_MAX];
   static uint8_t idx = 0U;
-  static uint8_t expected_len = RX_FRAME_LEN_ROBOT_VEL;
+  static uint8_t expected_len = COMMAND_PACKET_LEN;
   static uint8_t state = 0U;
 
   switch (state)
@@ -345,7 +624,7 @@ static void Serial_ProcessByte(uint8_t b)
       {
         frame[1] = b;
         idx = 2U;
-        expected_len = RX_FRAME_LEN_ROBOT_VEL;
+        expected_len = COMMAND_PACKET_LEN;
         state = 2U;
       }
       else if (b == RX_SOF0)
@@ -362,37 +641,51 @@ static void Serial_ProcessByte(uint8_t b)
       frame[idx++] = b;
       if (idx == 3U)
       {
-        if (frame[2] == RX_TYPE_VEL)
+        if (frame[2] == RX_TYPE_CONFIG_DISCOVER)
         {
-          expected_len = RX_FRAME_LEN_ROBOT_VEL;
+          expected_len = CONFIG_DISCOVER_PACKET_LEN;
         }
-        else if (frame[2] == RX_TYPE_FIELD_VEL)
+        else if (frame[2] == RX_TYPE_CONFIG_SET_ID)
         {
-          expected_len = RX_FRAME_LEN_FIELD_VEL;
+          expected_len = CONFIG_SET_ID_PACKET_LEN;
+        }
+        else if (frame[2] == RX_TYPE_TELEMETRY_REQUEST)
+        {
+          expected_len = TELEMETRY_REQUEST_PACKET_LEN;
         }
         else
         {
-          serial_dbg_rx_bad_type++;
-          state = 0U;
-          idx = 0U;
-          expected_len = RX_FRAME_LEN_ROBOT_VEL;
-          break;
+          expected_len = COMMAND_PACKET_LEN;
         }
       }
-
       if (idx >= expected_len)
       {
-        Serial_ProcessVelFrame(frame, expected_len);
+        if (frame[2] == RX_TYPE_CONFIG_DISCOVER)
+        {
+          Serial_ProcessDiscoverPacket(frame);
+        }
+        else if (frame[2] == RX_TYPE_CONFIG_SET_ID)
+        {
+          Serial_ProcessSetIdPacket(frame);
+        }
+        else if (frame[2] == RX_TYPE_TELEMETRY_REQUEST)
+        {
+          Serial_ProcessTelemetryRequest(frame);
+        }
+        else
+        {
+          Serial_ProcessCommandPacket(frame);
+        }
         state = 0U;
         idx = 0U;
-        expected_len = RX_FRAME_LEN_ROBOT_VEL;
+        expected_len = COMMAND_PACKET_LEN;
       }
       break;
 
     default:
       state = 0U;
       idx = 0U;
-      expected_len = RX_FRAME_LEN_ROBOT_VEL;
+      expected_len = COMMAND_PACKET_LEN;
       break;
   }
 }
@@ -456,24 +749,65 @@ static void Serial_TxKick(void)
   if (HAL_UART_Transmit_DMA(&huart2, uart_tx_buf, len) != HAL_OK)
   {
     uart_tx_busy = 0U;
+    uart_recovery_pending = 1U;
+  }
+}
+
+static void Serial_UartRecoveryTask(void)
+{
+  if (uart_recovery_pending == 0U)
+  {
+    return;
+  }
+
+  __disable_irq();
+  uart_recovery_pending = 0U;
+  uart_tx_busy = 0U;
+  uart_tx_q_head = 0U;
+  uart_tx_q_tail = 0U;
+  uart_tx_q_count = 0U;
+  telemetry_response_pending = 0U;
+  __enable_irq();
+
+  (void)HAL_UART_Abort(&huart2);
+  __HAL_UART_CLEAR_OREFLAG(&huart2);
+  uart_rx_last_pos = 0U;
+  if (HAL_UART_Receive_DMA(&huart2, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE) == HAL_OK)
+  {
+    __HAL_DMA_DISABLE_IT(&hdma_usart2_rx, DMA_IT_HT);
+  }
+  else
+  {
+    uart_recovery_pending = 1U;
   }
 }
 
 static void Serial_TelemetryTask(void)
 {
-  if ((HAL_GetTick() - last_telemetry_tick) < TELEMETRY_PERIOD_MS)
+  if (telemetry_response_pending == 0U)
   {
     return;
   }
 
-  last_telemetry_tick = HAL_GetTick();
+  const uint32_t now = HAL_GetTick();
+  if ((int32_t)(now - telemetry_due_tick) < 0)
+  {
+    return;
+  }
+
   AppC_Telemetry telem;
   AppC_GetTelemetry(&telem);
-  static uint16_t telemetry_seq = 0U;
-  TelemetryFrame frame;
+  TelemetryResponseFrame frame;
+  memset(&frame, 0, sizeof(frame));
   frame.sof = TELEMETRY_SOF;
-  frame.seq = telemetry_seq++;
+  frame.type = TX_TYPE_TELEMETRY_RESPONSE;
+  frame.version = TELEMETRY_PROTOCOL_VERSION;
+  frame.robot_id = live_robot_id;
+  frame.flags = telemetry_request_flags;
+  frame.status = 1U;
+  frame.request_sequence = telemetry_request_sequence;
   frame.time_ms = telem.time_ms;
+  frame.command_sequence = telem.last_command_sequence;
   frame.rpm1_x10 = (int16_t)(telem.rpm_m1 * 10.0f);
   frame.rpm2_x10 = (int16_t)(telem.rpm_m2 * 10.0f);
   frame.rpm3_x10 = (int16_t)(telem.rpm_m3 * 10.0f);
@@ -485,9 +819,16 @@ static void Serial_TelemetryTask(void)
   frame.battery_mv = (uint16_t)(telem.battery_voltage_v * 1000.0f);
   frame.battery_adc = (uint16_t)telem.battery_adc_raw;
   frame.brake = telem.stop_mode_brake;
-  frame.crc8 = TelemetryChecksum((const uint8_t *)&frame, (uint16_t)(sizeof(TelemetryFrame) - 1U));
+  frame.communication_ok = telem.communication_ok;
+  frame.kick_power = telem.kick_power;
+  frame.crc = Crc16CcittFalse((const uint8_t *)&frame, (uint16_t)(sizeof(frame) - sizeof(frame.crc)));
 
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)&frame, (uint16_t)sizeof(TelemetryFrame), 30U);
+  if (Serial_QueueTx((const uint8_t *)&frame, (uint16_t)sizeof(frame), 0U) != 0U)
+  {
+    last_telemetry_tick = now;
+    telemetry_has_sent = 1U;
+    telemetry_response_pending = 0U;
+  }
 }
 
 /* USER CODE END 0 */
@@ -533,6 +874,7 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+  RobotConfig_Init();
   AppC_Init(&hadc1, &htim1, &htim8, &htim5, &htim3, &htim2, &htim4, LED_GPIO_Port, LED_Pin);
   HAL_TIM_Base_Start_IT(&htim6);
   if (HAL_UART_Receive_DMA(&huart2, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE) != HAL_OK)
@@ -552,7 +894,10 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     AppC_Tick();
+    Serial_UartRecoveryTask();
     Serial_ProcessRx();
+    Serial_ConfigResponseTask();
+    Serial_TelemetryTask();
   }
   /* USER CODE END 3 */
 }
@@ -1180,8 +1525,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART2)
   {
+    uart_error_count++;
     uart_tx_busy = 0U;
-    Serial_TxKick();
+    uart_recovery_pending = 1U;
   }
 }
 

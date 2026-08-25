@@ -26,6 +26,7 @@ public:
   void Init();
   void Tick();
   void FastTick1kHz();
+  void ResetPidStates();
 
 private:
   struct PidState

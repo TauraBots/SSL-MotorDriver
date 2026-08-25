@@ -45,7 +45,8 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 48K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 256K
+  /* Last 2 KiB page (0x0803F800..0x0803FFFF) stores RobotConfig. */
+  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 254K
 }
 
 /* Sections */

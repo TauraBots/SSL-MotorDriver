@@ -147,6 +147,14 @@ void App::FastTick1kHz()
   ApplyMotors();
 }
 
+void App::ResetPidStates()
+{
+  ResetPi(pid1_);
+  ResetPi(pid2_);
+  ResetPi(pid3_);
+  ResetPi(pid4_);
+}
+
 float App::LowPassStep(BiquadState &f, float x)
 {
   const float y = (kLpB0 * x) + (kLpB1 * f.x1) + (kLpB2 * f.x2) - (kLpA1 * f.y1) - (kLpA2 * f.y2);

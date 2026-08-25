@@ -28,6 +28,9 @@ typedef struct
   int32_t cmd_m3;
   int32_t cmd_m4;
   uint8_t stop_mode_brake;
+  uint32_t last_command_sequence;
+  uint8_t communication_ok;
+  uint8_t kick_power;
   float rpm_m1;
   float rpm_m2;
   float rpm_m3;
@@ -44,8 +47,11 @@ typedef struct
   float m4;
 } AppC_WheelSpeeds;
 
-void AppC_SetCommands(float m1, float m2, float m3, float m4, uint8_t brake_mode);
+void AppC_SetCommands(uint32_t sequence,
+                      float m1, float m2, float m3, float m4,
+                      uint8_t kick_power, uint8_t brake_mode);
 void AppC_GetTelemetry(AppC_Telemetry *out);
+void AppC_ForceSafeState(void);
 void AppC_RobotToWheels(float vx, float vy, float omega,
                         float wheel_radius_m, float robot_radius_m,
                         AppC_WheelSpeeds *out_wheels);
