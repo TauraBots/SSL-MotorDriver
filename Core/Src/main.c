@@ -41,6 +41,7 @@
 #define UART_TX_QUEUE_DEPTH 8U
 #define TELEMETRY_SOF 0xAA55U
 #define COMMAND_PACKET_LEN 19U
+#define ROBOT_VELOCITY_PACKET_LEN 19U
 #define CONFIG_DISCOVER_PACKET_LEN 9U
 #define CONFIG_SET_ID_PACKET_LEN 22U
 #define CONFIG_RESPONSE_PACKET_LEN 23U
@@ -54,6 +55,8 @@
 #define TX_TYPE_CONFIG_DISCOVER_RESPONSE 0xF2U
 #define TX_TYPE_CONFIG_SET_ID_RESPONSE 0xF3U
 #define RX_TYPE_TELEMETRY_REQUEST 0xE0U
+#define RX_TYPE_ROBOT_VELOCITY 0xD0U
+#define ROBOT_VELOCITY_PROTOCOL_VERSION 1U
 #define TX_TYPE_TELEMETRY_RESPONSE 0xE1U
 #define TELEMETRY_PROTOCOL_VERSION 1U
 #define TELEMETRY_MIN_INTERVAL_MS 100U
@@ -452,6 +455,36 @@ static void Serial_ProcessCommandPacket(const uint8_t *buf)
       kick_power, brake_mode);
 }
 
+static void Serial_ProcessRobotVelocityPacket(const uint8_t *buf)
+{
+  const uint16_t crc_offset = ROBOT_VELOCITY_PACKET_LEN - 2U;
+  const uint16_t crc_rx = U16LE(&buf[crc_offset]);
+  const uint16_t crc_ok = Crc16CcittFalse(buf, crc_offset);
+  serial_dbg_crc_rx = crc_rx;
+  serial_dbg_crc_calc = crc_ok;
+  if ((crc_rx != crc_ok) || (buf[3] != ROBOT_VELOCITY_PROTOCOL_VERSION))
+  {
+    serial_dbg_rx_bad_crc++;
+    return;
+  }
+
+  serial_dbg_rx_frames++;
+  const uint8_t robot_id = buf[4];
+  if ((live_robot_configured == 0U) ||
+      ((robot_id != live_robot_id) && (robot_id != ROBOT_ID_BROADCAST)))
+  {
+    return;
+  }
+
+  const uint32_t sequence = U32LE(&buf[5]);
+  const float vx = (float)I16LE(&buf[9]) * 0.001f;
+  const float vy = (float)I16LE(&buf[11]) * 0.001f;
+  const float omega = (float)I16LE(&buf[13]) * 0.001f;
+  const uint8_t kick_power = buf[15];
+  const uint8_t brake_mode = buf[16];
+  AppC_SetRobotVelocity(sequence, vx, vy, omega, kick_power, brake_mode);
+}
+
 static uint32_t RobotConfigGeneration(void)
 {
   if (live_robot_configured == 0U)
@@ -653,6 +686,10 @@ static void Serial_ProcessByte(uint8_t b)
         {
           expected_len = TELEMETRY_REQUEST_PACKET_LEN;
         }
+        else if (frame[2] == RX_TYPE_ROBOT_VELOCITY)
+        {
+          expected_len = ROBOT_VELOCITY_PACKET_LEN;
+        }
         else
         {
           expected_len = COMMAND_PACKET_LEN;
@@ -671,6 +708,10 @@ static void Serial_ProcessByte(uint8_t b)
         else if (frame[2] == RX_TYPE_TELEMETRY_REQUEST)
         {
           Serial_ProcessTelemetryRequest(frame);
+        }
+        else if (frame[2] == RX_TYPE_ROBOT_VELOCITY)
+        {
+          Serial_ProcessRobotVelocityPacket(frame);
         }
         else
         {

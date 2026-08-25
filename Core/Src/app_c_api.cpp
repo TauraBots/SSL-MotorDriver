@@ -20,6 +20,9 @@ namespace
 {
 App *g_app = nullptr;
 constexpr float kSetpointMaxRpm = 530.0f;
+constexpr float kWheelRadiusM = 0.03f;
+constexpr float kRobotRadiusM = 0.09f;
+constexpr float kRadSToRpm = 9.5492966f;
 constexpr uint32_t kCommunicationTimeoutMs = 150U;
 uint32_t g_lastCommandSequence = 0U;
 uint32_t g_lastSequenceTick = 0U;
@@ -191,6 +194,21 @@ extern "C" void AppC_SetCommands(uint32_t sequence,
   {
     __enable_irq();
   }
+}
+
+extern "C" void AppC_SetRobotVelocity(uint32_t sequence,
+                                        float vx, float vy, float omega,
+                                        uint8_t kick_power, uint8_t brake_mode)
+{
+  static const OmniKinematics kinematics(kWheelRadiusM, kRobotRadiusM);
+  float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  kinematics.RobotToWheels(vx, vy, omega, wheelRadS);
+  AppC_SetCommands(sequence,
+                   wheelRadS[0] * kRadSToRpm,
+                   wheelRadS[1] * kRadSToRpm,
+                   wheelRadS[2] * kRadSToRpm,
+                   wheelRadS[3] * kRadSToRpm,
+                   kick_power, brake_mode);
 }
 
 extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)

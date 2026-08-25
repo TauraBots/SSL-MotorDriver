@@ -7,28 +7,35 @@
 - Formato: `8N1`
 - RX com `DMA` circular
 
-## Comando recebido
+## Comando de velocidade do robô
 
-O comando e um frame binario empacotado de `19 bytes`. Todos os campos
-multibyte usam little-endian.
+O comando principal é um frame binário empacotado de `19 bytes`. O host envia
+o movimento cartesiano desejado e o firmware calcula os quatro setpoints com
+`OmniKinematics`. Todos os campos multibyte usam little-endian.
 
 Layout:
 
 | Offset | Tamanho | Campo |
 | --- | --- | --- |
 | 0 | 2 | header `0xAA55` (bytes `55 AA`) |
-| 2 | 1 | `uint8_t robot_id`, ASCII `A..Z` ou `*` para broadcast |
-| 3 | 4 | `uint32_t sequence` |
-| 7 | 2 | `int16_t motor1` em RPM |
-| 9 | 2 | `int16_t motor2` em RPM |
-| 11 | 2 | `int16_t motor3` em RPM |
-| 13 | 2 | `int16_t motor4` em RPM |
+| 2 | 1 | tipo `0xD0` |
+| 3 | 1 | versão `1` |
+| 4 | 1 | `uint8_t robot_id`, ASCII `A..Z` ou `*` para broadcast |
+| 5 | 4 | `uint32_t sequence` |
+| 9 | 2 | `int16_t vx_mm_s`, velocidade para a direita em mm/s |
+| 11 | 2 | `int16_t vy_mm_s`, velocidade para a frente em mm/s |
+| 13 | 2 | `int16_t omega_mrad_s`, rotação anti-horária em mrad/s |
 | 15 | 1 | `uint8_t kick_power`, limitado a `0..100` |
 | 16 | 1 | `uint8_t brake`, zero para coast e nao-zero para brake |
 | 17 | 2 | `CRC16-CCITT-FALSE` dos bytes `0..16` |
 
-Pacotes destinados a outro robo sao descartados antes de atualizar comandos ou
-watchdog. O ID `*` transmite em broadcast.
+Pacotes destinados a outro robô são descartados antes de atualizar comandos ou
+watchdog. O ID `*` transmite em broadcast. O firmware converte os valores para
+SI, executa a cinemática, limita conjuntamente as rodas e então converte os
+resultados para RPM. A geometria não faz parte da aplicação do host.
+
+O frame legado de 19 bytes com `robot_id` no offset 2 e quatro RPMs nos offsets
+7–14 continua aceito apenas para compatibilidade e ensaios diretos de bancada.
 
 ## Identidade fisica e configuracao persistente
 

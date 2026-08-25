@@ -36,6 +36,17 @@ Arquivos principais:
 
 Abra o `.ioc` ou o projeto no STM32CubeIDE e compile a configuracao `Debug`.
 
+## SSL Configurator
+
+Instale as dependências e abra a interface Qt 6:
+
+```powershell
+python -m pip install -r scripts/requirements.txt
+python scripts/ssl-configurator.py
+```
+
+Os comandos de terminal (`drive`, `discover` e `set-id`) continuam disponíveis.
+
 ## Git
 
 Repositorio esperado:

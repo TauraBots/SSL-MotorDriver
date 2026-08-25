@@ -50,6 +50,9 @@ typedef struct
 void AppC_SetCommands(uint32_t sequence,
                       float m1, float m2, float m3, float m4,
                       uint8_t kick_power, uint8_t brake_mode);
+void AppC_SetRobotVelocity(uint32_t sequence,
+                           float vx, float vy, float omega,
+                           uint8_t kick_power, uint8_t brake_mode);
 void AppC_GetTelemetry(AppC_Telemetry *out);
 void AppC_ForceSafeState(void);
 void AppC_RobotToWheels(float vx, float vy, float omega,

@@ -8,8 +8,6 @@ import struct
 import sys
 import threading
 import time
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 
 import serial
 from serial.tools import list_ports
@@ -17,10 +15,8 @@ from serial.tools import list_ports
 
 RX_SOF0 = 0x55
 RX_SOF1 = 0xAA
-WHEEL_RADIUS_M = 0.03
-ROBOT_RADIUS_M = 0.09
-MAX_WHEEL_RAD_S = 52.36
-RAD_S_TO_RPM = 9.5492966
+ROBOT_VELOCITY_TYPE = 0xD0
+ROBOT_VELOCITY_VERSION = 1
 TELEMETRY_REQUEST_TYPE = 0xE0
 TELEMETRY_RESPONSE_TYPE = 0xE1
 TELEMETRY_VERSION = 1
@@ -136,24 +132,16 @@ def run_config_action(args):
         raise RuntimeError("target board did not acknowledge configuration")
 
 
-def robot_to_motor_rpm(vx: float, vy: float, omega: float):
-    wheel_phi_deg = (30.0, 150.0, 225.0, 315.0)
-    wheel_rad_s = []
-    for phi_deg in wheel_phi_deg:
-        phi = math.radians(phi_deg)
-        theta = phi + (math.pi * 0.5)
-        value = (math.cos(theta) * vx + math.sin(theta) * vy + ROBOT_RADIUS_M * omega) / WHEEL_RADIUS_M
-        wheel_rad_s.append(value)
-    max_abs = max(abs(value) for value in wheel_rad_s)
-    if max_abs > MAX_WHEEL_RAD_S:
-        scale = MAX_WHEEL_RAD_S / max_abs
-        wheel_rad_s = [value * scale for value in wheel_rad_s]
-    return tuple(int(round(value * RAD_S_TO_RPM)) for value in wheel_rad_s)
-
-
-def encode_command_packet(robot_id: str, sequence: int, motors, kick_power: int = 0, brake: int = 0) -> bytes:
+def encode_robot_velocity_packet(robot_id: str, sequence: int, vx: float, vy: float,
+                                 omega: float, kick_power: int = 0, brake: int = 0) -> bytes:
     kick_power = max(0, min(100, kick_power))
-    payload = struct.pack("<HBIhhhhBB", 0xAA55, ord(robot_id), sequence & 0xFFFFFFFF, *motors, kick_power, 1 if brake else 0)
+    values = tuple(max(-32768, min(32767, int(round(value * 1000.0))))
+                   for value in (vx, vy, omega))
+    payload = struct.pack(
+        "<HBBBIhhhBB", 0xAA55, ROBOT_VELOCITY_TYPE,
+        ROBOT_VELOCITY_VERSION, ord(robot_id), sequence & 0xFFFFFFFF,
+        *values, kick_power, 1 if brake else 0,
+    )
     return payload + struct.pack("<H", crc16_ccitt_false(payload))
 
 
@@ -547,8 +535,8 @@ class ConfiguratorApp:
             try:
                 self.sequence = (self.sequence + 1) & 0xFFFFFFFF
                 if self.connected_robot_id:
-                    self.ser.write(encode_command_packet(
-                        self.connected_robot_id, self.sequence, (0, 0, 0, 0), brake=1))
+                    self.ser.write(encode_robot_velocity_packet(
+                        self.connected_robot_id, self.sequence, 0.0, 0.0, 0.0, brake=1))
                 self.ser.close()
             except Exception:
                 try:
@@ -596,7 +584,7 @@ class ConfiguratorApp:
         self.vx += (vx - self.vx) * alpha
         self.vy += (vy - self.vy) * alpha
         self.omega += (omega - self.omega) * alpha
-        return robot_to_motor_rpm(self.vx, self.vy, self.omega)
+        return self.vx, self.vy, self.omega
 
     def io_tick(self):
         if not self.running or not self.ser:
@@ -607,10 +595,12 @@ class ConfiguratorApp:
             if robot_id is None:
                 raise RuntimeError("ID do robô não está definido para esta conexão")
             if now >= self.next_command:
-                motors = self.motion_command(now)
+                vx, vy, omega = self.motion_command(now)
                 self.sequence = (self.sequence + 1) & 0xFFFFFFFF
                 kick = max(0, min(100, self.kick_var.get())) if self.kick_pending else 0
-                self.ser.write(encode_command_packet(robot_id, self.sequence, motors, kick, int(motors == (0, 0, 0, 0))))
+                stopped = vx == vy == omega == 0.0
+                self.ser.write(encode_robot_velocity_packet(
+                    robot_id, self.sequence, vx, vy, omega, kick, stopped))
                 self.kick_pending = False
                 self.next_command = now + 0.05
             hz = max(0.0, self.telemetry_hz_var.get())
@@ -863,7 +853,16 @@ class ConfiguratorApp:
 def main():
     args = parse_args()
     if args.action == "app":
-        return ConfiguratorApp(args).run()
+        try:
+            from ssl_configurator_qt import QtConfiguratorApp
+        except ImportError as exc:
+            if exc.name == "PySide6":
+                raise RuntimeError(
+                    "A interface gráfica requer PySide6. Instale com: "
+                    "python -m pip install PySide6"
+                ) from exc
+            raise
+        return QtConfiguratorApp(args, sys.modules[__name__]).run()
     if args.action in ("discover", "set-id"):
         return run_config_action(args)
 
@@ -894,7 +893,7 @@ def main():
 
     with serial.Serial(args.port, args.baud, timeout=0.02) as ser:
         sequence = 0
-        ser.write(encode_command_packet(robot_id, sequence, (0, 0, 0, 0), brake=1))
+        ser.write(encode_robot_velocity_packet(robot_id, sequence, 0.0, 0.0, 0.0, brake=1))
         next_send = time.monotonic()
         running = True
         kick_pending = False
@@ -957,10 +956,10 @@ def main():
 
                 if now >= next_send:
                     sequence = (sequence + 1) & 0xFFFFFFFF
-                    motors = robot_to_motor_rpm(vx, vy, omega)
-                    brake = int(motors == (0, 0, 0, 0))
+                    brake = int(vx == vy == omega == 0.0)
                     packet_kick_power = kick_power if kick_pending else 0
-                    ser.write(encode_command_packet(robot_id, sequence, motors, packet_kick_power, brake))
+                    ser.write(encode_robot_velocity_packet(
+                        robot_id, sequence, vx, vy, omega, packet_kick_power, brake))
                     kick_pending = False
                     next_send = now + period_s
 
@@ -984,7 +983,7 @@ def main():
                 clock.tick(60)
         finally:
             sequence = (sequence + 1) & 0xFFFFFFFF
-            ser.write(encode_command_packet(robot_id, sequence, (0, 0, 0, 0), brake=1))
+            ser.write(encode_robot_velocity_packet(robot_id, sequence, 0.0, 0.0, 0.0, brake=1))
             pygame.quit()
             if log_file:
                 log_file.close()

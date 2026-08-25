@@ -12,6 +12,8 @@ Release/
 
 .settings/
 .vscode/
+__pycache__/
+*.py[cod]
 
 telemetry.csv
 plots/*.png
