@@ -7,7 +7,8 @@ constexpr float kEncPpr = 11.0f;
 constexpr float kEncMult = 4.0f;
 constexpr float kGearRatio = 18.8f;
 constexpr float kTicksPerRevOut = kEncPpr * kEncMult * kGearRatio;
-constexpr uint32_t kRpmSampleMs = 1U;
+constexpr uint32_t kControlTickMs = 1U;
+constexpr uint32_t kRpmWindowMs = 10U;
 constexpr uint32_t kBatterySampleMs = 100U;
 constexpr uint32_t kHeartbeatMs = 200U;
 constexpr float kControlDtS = 0.001f;
@@ -20,7 +21,6 @@ constexpr float kZeroSetpointRpm = 3.0f;
 constexpr float kMovingRpm = 3.0f;
 constexpr float kStaticStartPwm[4] = {425.0f, 425.0f, 425.0f, 425.0f};
 constexpr float kStaticRunPwm[4] = {40.0f, 40.0f, 40.0f, 40.0f};
-constexpr float kEncoderFaultMinRefRpm = 20.0f;
 constexpr float kEncoderFaultMaxMeasuredRpm = 2.0f;
 constexpr int32_t kEncoderFaultMinPwm = 650;
 constexpr uint16_t kEncoderFaultTripTicks = 300U;
@@ -32,6 +32,9 @@ constexpr float kLpA2 = 0.83718165f;
 constexpr float kAdcRefV = 3.3f;
 constexpr float kAdcMax = 4095.0f;
 constexpr float kBatteryDividerGain = (10.0f + 3.3f) / 3.3f;
+constexpr float kBatteryUndervoltageTripV = 9.6f;
+constexpr float kBatteryUndervoltageRecoverV = 10.2f;
+constexpr uint8_t kBatteryFaultSamples = 3U;
 }
 
 volatile int32_t cmd_m1 = 0;
@@ -85,6 +88,10 @@ App::App(const AppContext &ctx):
       pid3_{kPidKp, kPidKi, kPidKd, 0.0f, 0.0f, kPidOutMin, kPidOutMax},
       pid4_{kPidKp, kPidKi, kPidKd, 0.0f, 0.0f, kPidOutMin, kPidOutMax},
       encoderFaultCount_{0U, 0U, 0U, 0U},
+      batteryValid_(0U),
+      batteryUndervoltage_(0U),
+      batteryLowCount_(0U),
+      batteryAdcFailureCount_(0U),
       rpmFilt1_{0.0f, 0.0f, 0.0f, 0.0f},
       rpmFilt2_{0.0f, 0.0f, 0.0f, 0.0f},
       rpmFilt3_{0.0f, 0.0f, 0.0f, 0.0f},
@@ -135,10 +142,10 @@ void App::Tick()
 
 void App::FastTick1kHz()
 {
-  e1_.UpdateRpm(kRpmSampleMs);
-  e2_.UpdateRpm(kRpmSampleMs);
-  e3_.UpdateRpm(kRpmSampleMs);
-  e4_.UpdateRpm(kRpmSampleMs);
+  e1_.UpdateRpm(kControlTickMs, kRpmWindowMs);
+  e2_.UpdateRpm(kControlTickMs, kRpmWindowMs);
+  e3_.UpdateRpm(kControlTickMs, kRpmWindowMs);
+  e4_.UpdateRpm(kControlTickMs, kRpmWindowMs);
 
   rpm_m1 = LowPassStep(rpmFilt1_, e1_.Rpm());
   rpm_m2 = LowPassStep(rpmFilt2_, e2_.Rpm());
@@ -153,6 +160,35 @@ void App::ResetPidStates()
   ResetPi(pid2_);
   ResetPi(pid3_);
   ResetPi(pid4_);
+}
+
+void App::ForceSafeOutputs()
+{
+  setpoint_m1 = setpoint_m2 = setpoint_m3 = setpoint_m4 = 0.0f;
+  stop_mode_brake = 1U;
+  ResetPidStates();
+  m1_.ForceStop(true);
+  m2_.ForceStop(true);
+  m3_.ForceStop(true);
+  m4_.ForceStop(true);
+  cmd_m1 = cmd_m2 = cmd_m3 = cmd_m4 = 0;
+}
+
+uint8_t App::FaultStatus() const
+{
+  uint8_t status = 0U;
+  for (uint8_t i = 0U; i < 4U; i++)
+  {
+    if (encoderFaultCount_[i] >= kEncoderFaultTripTicks)
+    {
+      status |= (uint8_t)(1U << i);
+    }
+  }
+  if ((batteryValid_ == 0U) || (batteryUndervoltage_ != 0U))
+  {
+    status |= 0x10U;
+  }
+  return status;
 }
 
 float App::LowPassStep(BiquadState &f, float x)
@@ -182,12 +218,20 @@ void App::UpdateBattery()
 
   if (HAL_ADC_Start(batteryAdc_) != HAL_OK)
   {
+    if (++batteryAdcFailureCount_ >= kBatteryFaultSamples)
+    {
+      batteryValid_ = 0U;
+    }
     return;
   }
 
   if (HAL_ADC_PollForConversion(batteryAdc_, 2U) != HAL_OK)
   {
     HAL_ADC_Stop(batteryAdc_);
+    if (++batteryAdcFailureCount_ >= kBatteryFaultSamples)
+    {
+      batteryValid_ = 0U;
+    }
     return;
   }
 
@@ -195,13 +239,48 @@ void App::UpdateBattery()
   HAL_ADC_Stop(batteryAdc_);
 
   battery_adc_raw = raw;
+  batteryAdcFailureCount_ = 0U;
   const float vAdc = (static_cast<float>(raw) * kAdcRefV) / kAdcMax;
   battery_voltage_v = vAdc * kBatteryDividerGain;
+  batteryValid_ = 1U;
+  if (battery_voltage_v < kBatteryUndervoltageTripV)
+  {
+    if (batteryLowCount_ < kBatteryFaultSamples)
+    {
+      batteryLowCount_++;
+    }
+    if (batteryLowCount_ >= kBatteryFaultSamples)
+    {
+      batteryUndervoltage_ = 1U;
+    }
+  }
+  else if (battery_voltage_v >= kBatteryUndervoltageRecoverV)
+  {
+    batteryLowCount_ = 0U;
+    batteryUndervoltage_ = 0U;
+  }
+  else if (batteryUndervoltage_ == 0U)
+  {
+    batteryLowCount_ = 0U;
+  }
 }
 
 void App::ApplyMotors()
 {
   const bool brakeMode = (stop_mode_brake != 0U);
+
+  if ((batteryValid_ == 0U) || (batteryUndervoltage_ != 0U))
+  {
+    setpoint_m1 = setpoint_m2 = setpoint_m3 = setpoint_m4 = 0.0f;
+    stop_mode_brake = 1U;
+    ResetPidStates();
+    m1_.ForceStop(true);
+    m2_.ForceStop(true);
+    m3_.ForceStop(true);
+    m4_.ForceStop(true);
+    cmd_m1 = cmd_m2 = cmd_m3 = cmd_m4 = 0;
+    return;
+  }
 
   const float piOut1 = ComputePid(pid1_, setpoint_m1, rpm_m1, kControlDtS);
   const float piOut2 = ComputePid(pid2_, setpoint_m2, rpm_m2, kControlDtS);
@@ -327,7 +406,6 @@ int32_t App::ApplyEncoderFaultProtection(uint32_t motorIndex, PidState &pid, flo
   }
 
   const bool suspicious =
-      (std::fabs(setpointRpm) >= kEncoderFaultMinRefRpm) &&
       (std::abs(cmd) >= kEncoderFaultMinPwm) &&
       (std::fabs(measuredRpm) <= kEncoderFaultMaxMeasuredRpm);
 

@@ -27,6 +27,8 @@ public:
   void Tick();
   void FastTick1kHz();
   void ResetPidStates();
+  void ForceSafeOutputs();
+  uint8_t FaultStatus() const;
 
 private:
   struct PidState
@@ -75,7 +77,11 @@ private:
   PidState pid2_;
   PidState pid3_;
   PidState pid4_;
-  uint16_t encoderFaultCount_[4];
+  volatile uint16_t encoderFaultCount_[4];
+  volatile uint8_t batteryValid_;
+  volatile uint8_t batteryUndervoltage_;
+  uint8_t batteryLowCount_;
+  uint8_t batteryAdcFailureCount_;
   BiquadState rpmFilt1_;
   BiquadState rpmFilt2_;
   BiquadState rpmFilt3_;

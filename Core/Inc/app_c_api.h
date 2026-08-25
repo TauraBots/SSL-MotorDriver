@@ -31,6 +31,7 @@ typedef struct
   uint32_t last_command_sequence;
   uint8_t communication_ok;
   uint8_t kick_power;
+  uint8_t fault_status;
   float rpm_m1;
   float rpm_m2;
   float rpm_m3;
@@ -55,6 +56,7 @@ void AppC_SetRobotVelocity(uint32_t sequence,
                            uint8_t kick_power, uint8_t brake_mode);
 void AppC_GetTelemetry(AppC_Telemetry *out);
 void AppC_ForceSafeState(void);
+void AppC_EmergencyStop(void);
 void AppC_RobotToWheels(float vx, float vy, float omega,
                         float wheel_radius_m, float robot_radius_m,
                         AppC_WheelSpeeds *out_wheels);

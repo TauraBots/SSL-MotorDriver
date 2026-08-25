@@ -11,6 +11,7 @@ public:
 
   void Start() const;
   void ApplySigned(int32_t cmd, bool brakeMode) const;
+  void ForceStop(bool brakeMode) const;
 
 private:
   static uint16_t ClampDuty(int32_t duty);

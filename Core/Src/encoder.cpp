@@ -1,7 +1,8 @@
 #include "encoder.hpp"
 
 Encoder::Encoder(TIM_HandleTypeDef *htim, float ticksPerRev, int8_t direction)
-    : htim_(htim), ticksPerRev_(ticksPerRev), direction_(direction), lastCnt_(0), delta_(0), rpm_(0.0f)
+    : htim_(htim), ticksPerRev_(ticksPerRev), direction_(direction), lastCnt_(0), delta_(0),
+      accumulatedDelta_(0), accumulatedMs_(0U), rpm_(0.0f)
 {
 }
 
@@ -11,7 +12,7 @@ void Encoder::Start()
   lastCnt_ = static_cast<int32_t>(__HAL_TIM_GET_COUNTER(htim_));
 }
 
-void Encoder::UpdateRpm(uint32_t dtMs)
+void Encoder::UpdateRpm(uint32_t dtMs, uint32_t windowMs)
 {
   const uint32_t arr = __HAL_TIM_GET_AUTORELOAD(htim_);
   const int32_t now = static_cast<int32_t>(__HAL_TIM_GET_COUNTER(htim_));
@@ -19,8 +20,18 @@ void Encoder::UpdateRpm(uint32_t dtMs)
   delta_ = DeltaWithOverflow(now, lastCnt_, arr);
   lastCnt_ = now;
 
-  const float dt = static_cast<float>(dtMs) / 1000.0f;
-  rpm_ = (static_cast<float>(delta_) / ticksPerRev_) * (60.0f / dt) * static_cast<float>(direction_);
+  accumulatedDelta_ += delta_;
+  accumulatedMs_ += dtMs;
+  if ((accumulatedMs_ < windowMs) || (accumulatedMs_ == 0U))
+  {
+    return;
+  }
+
+  const float dt = static_cast<float>(accumulatedMs_) / 1000.0f;
+  rpm_ = (static_cast<float>(accumulatedDelta_) / ticksPerRev_) *
+         (60.0f / dt) * static_cast<float>(direction_);
+  accumulatedDelta_ = 0;
+  accumulatedMs_ = 0U;
 }
 
 int32_t Encoder::DeltaWithOverflow(int32_t now, int32_t prev, uint32_t arr)

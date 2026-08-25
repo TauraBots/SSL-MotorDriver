@@ -48,6 +48,11 @@ void Motor::ApplySigned(int32_t cmd, bool brakeMode) const
   }
 }
 
+void Motor::ForceStop(bool brakeMode) const
+{
+  Stop(brakeMode);
+}
+
 uint16_t Motor::ClampDuty(int32_t duty)
 {
   if (duty < 0)

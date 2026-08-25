@@ -80,7 +80,7 @@ void EnterSafeState()
   live_comm_kick_power = 0U;
   if (g_app != nullptr)
   {
-    g_app->ResetPidStates();
+    g_app->ForceSafeOutputs();
   }
   if (primask == 0U)
   {
@@ -227,6 +227,7 @@ extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)
   out->last_command_sequence = g_lastCommandSequence;
   out->communication_ok = g_communicationOk;
   out->kick_power = g_kickPower;
+  out->fault_status = (g_app != nullptr) ? g_app->FaultStatus() : 0U;
   out->rpm_m1 = rpm_m1;
   out->rpm_m2 = rpm_m2;
   out->rpm_m3 = rpm_m3;
@@ -238,6 +239,14 @@ extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)
 extern "C" void AppC_ForceSafeState(void)
 {
   EnterSafeState();
+}
+
+extern "C" void AppC_EmergencyStop(void)
+{
+  TIM1->CCER = 0U;
+  TIM8->CCER = 0U;
+  TIM1->BDTR &= ~TIM_BDTR_MOE;
+  TIM8->BDTR &= ~TIM_BDTR_MOE;
 }
 
 extern "C" void AppC_RobotToWheels(float vx, float vy, float omega,

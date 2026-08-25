@@ -127,7 +127,7 @@ ms. O firmware limita respostas a no maximo 10 Hz.
 | `version` | `uint8_t` | `1` |
 | `robot_id` | `uint8_t` | origem da resposta |
 | `flags` | `uint8_t` | eco da requisicao |
-| `status` | `uint8_t` | `1` para resposta valida |
+| `status` | `uint8_t` | bit 0 válido; bits 1–4 falha dos encoders M1–M4; bit 5 subtensão |
 | `request_sequence` | `uint16_t` | eco da requisicao |
 | `time_ms` | `uint32_t` | tempo de `HAL_GetTick()` |
 | `command_sequence` | `uint32_t` | ultimo comando aceito |
@@ -159,3 +159,6 @@ USART2 READY\r\n
 - A recepcao descarta qualquer frame com CRC invalido.
 - Respostas de telemetria usam a fila de TX por DMA.
 - Em 9600 baud, recomenda-se polling de 5 Hz e comandos de 20 Hz.
+- A subtensão é confirmada após três leituras abaixo de 9,6 V e liberada acima
+  de 10,2 V. Enquanto ativa, os setpoints são zerados e o freio é aplicado.
+- A medição de encoder acumula contagens por 10 ms; o controle permanece em 1 kHz.

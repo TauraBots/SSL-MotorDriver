@@ -19,7 +19,12 @@ from PySide6.QtWidgets import (
 
 
 STYLE = """
-QWidget { background: #09111f; color: #edf4ff; font-family: 'Segoe UI'; font-size: 10pt; }
+QWidget {
+    background: #0b1220;
+    color: #e8eef7;
+    font-family: "Segoe UI";
+    font-size: 10pt;
+}
 QMainWindow { background: #09111f; }
 QFrame#card { background: #111d30; border: 1px solid #263854; border-radius: 12px; }
 QLabel#title { color: #36d7ef; font-size: 21pt; font-weight: 700; }
@@ -39,6 +44,34 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus { border-col
 QTabWidget::pane { border: none; top: -1px; }
 QTabBar::tab { background: #111d30; color: #91a6c1; padding: 11px 20px; margin-right: 3px; border-top-left-radius: 7px; border-top-right-radius: 7px; }
 QTabBar::tab:selected { background: #182740; color: #36d7ef; }
+QScrollBar:vertical {
+    background: #101a2b;
+    width: 10px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: #304766;
+    border-radius: 5px;
+    min-height: 30px;
+}
+QToolTip {
+    background: #182740;
+    color: #edf4ff;
+    border: 1px solid #36d7ef;
+    padding: 5px;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+}
+QPushButton {
+    min-height: 34px;
+}
+QListWidget::item:selected {
+    background: #36d7ef;
+    color: #061018;
+}
+
 """
 
 
@@ -203,7 +236,9 @@ class QtConfiguratorApp(QMainWindow):
         return port, int(self.baud_box.currentText())
 
     def toggle_connection(self):
-        if self.ser: self.disconnect(); return
+        if self.ser:
+            self.disconnect()
+            return
         try:
             robot_id = self.robot_box.currentText(); port, baud = self.serial_settings()
             self.ser = serial.Serial(port, baud, timeout=0); self.ser.reset_input_buffer(); self.connected_robot_id = robot_id
@@ -269,7 +304,17 @@ class QtConfiguratorApp(QMainWindow):
         except Exception as exc: self.disconnect(); self.show_error("Comunicação", str(exc))
 
     def update_telemetry(self, telemetry):
-        self.last_telemetry_received = time.monotonic(); self.comm_label.setText("OK" if telemetry["comm_ok"] else "LOST"); self.seq_label.setText(str(telemetry["command_sequence"])); self.battery_label.setText(f'{telemetry["battery_v"]:.2f} V')
+        self.last_telemetry_received = time.monotonic()
+        faults = telemetry.get("fault_status", 0)
+        if faults:
+            names = [f"M{i + 1}" for i in range(4) if faults & (1 << i)]
+            if faults & 0x10: names.append("BATERIA")
+            self.comm_label.setText("FALHA " + ",".join(names))
+            self.comm_label.setStyleSheet("color:#ff6577")
+        else:
+            self.comm_label.setText("OK" if telemetry["comm_ok"] else "LOST")
+            self.comm_label.setStyleSheet("")
+        self.seq_label.setText(str(telemetry["command_sequence"])); self.battery_label.setText(f'{telemetry["battery_v"]:.2f} V')
         for label, rpm in zip(self.rpm_labels, telemetry["rpm"]): label.setText(f"{rpm:+.0f}")
         if self.log_writer: self.log_writer.writerow(self.b.telemetry_csv_row(telemetry)); self.log_file.flush()
 

@@ -115,9 +115,6 @@ static uint8_t config_response_pending = 0U;
 static uint8_t config_response_type = 0U;
 static uint8_t config_response_status = 0U;
 
-static volatile float vx = 0.0f;
-static volatile float vy = 0.0f;
-static volatile float w = 0.0f;
 volatile float serial_dbg_rx_vx = 0.0f;
 volatile float serial_dbg_rx_vy = 0.0f;
 volatile float serial_dbg_rx_omega = 0.0f;
@@ -132,10 +129,6 @@ volatile float dbg_wheel_m1_rpm = 0.0f;
 volatile float dbg_wheel_m2_rpm = 0.0f;
 volatile float dbg_wheel_m3_rpm = 0.0f;
 volatile float dbg_wheel_m4_rpm = 0.0f;
-
-volatile float serial_dbg_applied_vx = 0.0f;
-volatile float serial_dbg_applied_vy = 0.0f;
-volatile float serial_dbg_applied_omega = 0.0f;
 
 /* USER CODE END PV */
 
@@ -174,6 +167,9 @@ static void Serial_ProcessDiscoverPacket(const uint8_t *buf);
 static void Serial_ProcessSetIdPacket(const uint8_t *buf);
 static void Serial_ProcessTelemetryRequest(const uint8_t *buf);
 static uint32_t Crc32Ieee(const uint8_t *data, uint16_t len);
+static void Watchdog_Init(void);
+static void Watchdog_Refresh(void);
+static int16_t SaturateI16(float value);
 
 /* USER CODE END PFP */
 
@@ -416,6 +412,34 @@ static int16_t I16LE(const uint8_t *p)
   return (int16_t)U16LE(p);
 }
 
+static int16_t SaturateI16(float value)
+{
+  if (value > 32767.0f)
+  {
+    return INT16_MAX;
+  }
+  if (value < -32768.0f)
+  {
+    return INT16_MIN;
+  }
+  return (int16_t)value;
+}
+
+static void Watchdog_Init(void)
+{
+  /* About 1.5 s at the nominal 40 kHz LSI, including oscillator tolerance. */
+  IWDG->KR = 0x5555U;
+  IWDG->PR = 6U;
+  IWDG->RLR = 234U;
+  IWDG->KR = 0xAAAAU;
+  IWDG->KR = 0xCCCCU;
+}
+
+static void Watchdog_Refresh(void)
+{
+  IWDG->KR = 0xAAAAU;
+}
+
 static void Serial_ProcessCommandPacket(const uint8_t *buf)
 {
   const uint16_t crc_offset = COMMAND_PACKET_LEN - 2U;
@@ -482,6 +506,9 @@ static void Serial_ProcessRobotVelocityPacket(const uint8_t *buf)
   const float omega = (float)I16LE(&buf[13]) * 0.001f;
   const uint8_t kick_power = buf[15];
   const uint8_t brake_mode = buf[16];
+  serial_dbg_rx_vx = vx;
+  serial_dbg_rx_vy = vy;
+  serial_dbg_rx_omega = omega;
   AppC_SetRobotVelocity(sequence, vx, vy, omega, kick_power, brake_mode);
 }
 
@@ -738,10 +765,14 @@ static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_pr
     return 0U;
   }
 
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   if (uart_tx_q_count >= UART_TX_QUEUE_DEPTH)
   {
-    __enable_irq();
+    if (primask == 0U)
+    {
+      __enable_irq();
+    }
     return 0U;
   }
 
@@ -772,10 +803,14 @@ static void Serial_TxKick(void)
     return;
   }
 
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   if ((uart_tx_busy != 0U) || (uart_tx_q_count == 0U))
   {
-    __enable_irq();
+    if (primask == 0U)
+    {
+      __enable_irq();
+    }
     return;
   }
 
@@ -785,7 +820,10 @@ static void Serial_TxKick(void)
   uart_tx_q_head = (uart_tx_q_head + 1U) % UART_TX_QUEUE_DEPTH;
   uart_tx_q_count--;
   uart_tx_busy = 1U;
-  __enable_irq();
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
 
   if (HAL_UART_Transmit_DMA(&huart2, uart_tx_buf, len) != HAL_OK)
   {
@@ -801,6 +839,7 @@ static void Serial_UartRecoveryTask(void)
     return;
   }
 
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   uart_recovery_pending = 0U;
   uart_tx_busy = 0U;
@@ -808,7 +847,13 @@ static void Serial_UartRecoveryTask(void)
   uart_tx_q_tail = 0U;
   uart_tx_q_count = 0U;
   telemetry_response_pending = 0U;
-  __enable_irq();
+  if (primask == 0U)
+  {
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  }
 
   (void)HAL_UART_Abort(&huart2);
   __HAL_UART_CLEAR_OREFLAG(&huart2);
@@ -845,14 +890,14 @@ static void Serial_TelemetryTask(void)
   frame.version = TELEMETRY_PROTOCOL_VERSION;
   frame.robot_id = live_robot_id;
   frame.flags = telemetry_request_flags;
-  frame.status = 1U;
+  frame.status = (uint8_t)(1U | (uint8_t)(telem.fault_status << 1));
   frame.request_sequence = telemetry_request_sequence;
   frame.time_ms = telem.time_ms;
   frame.command_sequence = telem.last_command_sequence;
-  frame.rpm1_x10 = (int16_t)(telem.rpm_m1 * 10.0f);
-  frame.rpm2_x10 = (int16_t)(telem.rpm_m2 * 10.0f);
-  frame.rpm3_x10 = (int16_t)(telem.rpm_m3 * 10.0f);
-  frame.rpm4_x10 = (int16_t)(telem.rpm_m4 * 10.0f);
+  frame.rpm1_x10 = SaturateI16(telem.rpm_m1 * 10.0f);
+  frame.rpm2_x10 = SaturateI16(telem.rpm_m2 * 10.0f);
+  frame.rpm3_x10 = SaturateI16(telem.rpm_m3 * 10.0f);
+  frame.rpm4_x10 = SaturateI16(telem.rpm_m4 * 10.0f);
   frame.cmd1 = (int16_t)telem.cmd_m1;
   frame.cmd2 = (int16_t)telem.cmd_m2;
   frame.cmd3 = (int16_t)telem.cmd_m3;
@@ -915,6 +960,7 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+  Watchdog_Init();
   RobotConfig_Init();
   AppC_Init(&hadc1, &htim1, &htim8, &htim5, &htim3, &htim2, &htim4, LED_GPIO_Port, LED_Pin);
   HAL_TIM_Base_Start_IT(&htim6);
@@ -939,6 +985,7 @@ int main(void)
     Serial_ProcessRx();
     Serial_ConfigResponseTask();
     Serial_TelemetryTask();
+    Watchdog_Refresh();
   }
   /* USER CODE END 3 */
 }
@@ -1025,7 +1072,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_14;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1176,11 +1223,11 @@ static void MX_TIM2_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 6;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 6;
   if (HAL_TIM_Encoder_Init(&htim2, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1225,11 +1272,11 @@ static void MX_TIM3_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 6;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 6;
   if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1274,11 +1321,11 @@ static void MX_TIM4_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 6;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 6;
   if (HAL_TIM_Encoder_Init(&htim4, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1323,11 +1370,11 @@ static void MX_TIM5_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 6;
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 6;
   if (HAL_TIM_Encoder_Init(&htim5, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -1582,6 +1629,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  AppC_EmergencyStop();
   __disable_irq();
   while (1)
   {

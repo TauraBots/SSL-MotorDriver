@@ -177,6 +177,7 @@ def parse_telemetry(rx_buffer: bytearray, robot_id: str):
             "robot_id": chr(values[3]),
             "flags": values[4],
             "status": values[5],
+            "fault_status": values[5] >> 1,
             "request_sequence": values[6],
             "time_ms": values[7],
             "command_sequence": values[8],
