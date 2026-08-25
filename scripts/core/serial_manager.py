@@ -1,0 +1,212 @@
+"""Qt serial backend; this is the only module that owns serial ports."""
+
+import math
+import threading
+import time
+
+import serial
+from serial.tools import list_ports
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from .protocol import Protocol
+from .robot_state import RobotState
+from .telemetry import TelemetryHistory
+
+
+class SerialManager(QObject):
+    connected = Signal(str, int, str)
+    disconnected = Signal()
+    telemetry_received = Signal(dict)
+    command_sent = Signal(float, float, float, int)
+    telemetry_lost = Signal()
+    error = Signal(str)
+    boards_discovered = Signal(object, int)
+    board_configured = Signal(str)
+    motion_configured = Signal(float, float)
+    configuration_finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.state = RobotState()
+        self.history = TelemetryHistory()
+        self._serial = None
+        self._rx = bytearray()
+        self._timer = QTimer(self)
+        self._timer.setInterval(10)
+        self._timer.timeout.connect(self._tick)
+        self._sequence = int(time.time() * 1000) & 0xFFFFFFFF
+        self._request_sequence = 0
+        self._next_command = self._next_telemetry = 0.0
+        self._last_motion = time.monotonic()
+        self._last_telemetry = 0.0
+        self._lost_emitted = False
+        self._target = (0.0, 0.0, 0.0)
+        self._kick_power = 0
+        self._kick_pending = False
+        self._brake = True
+
+    @property
+    def is_connected(self):
+        return self._serial is not None and self._serial.is_open
+
+    @staticmethod
+    def available_ports():
+        return [port.device for port in list_ports.comports()]
+
+    @staticmethod
+    def validate_uid(uid_text):
+        Protocol.parse_uid(uid_text)
+
+    def connect_serial(self, port, baud, robot_id):
+        self.disconnect_serial(send_brake=False)
+        try:
+            self._serial = serial.Serial(port, baud, timeout=0)
+            self._serial.reset_input_buffer()
+            self.state = RobotState(robot_id=robot_id, connected=True, port=port, baud=baud,
+                                    communication_status="waiting")
+            self._rx.clear(); self.history.clear(); self._request_sequence = 0
+            now = time.monotonic()
+            self._next_command, self._next_telemetry, self._last_motion = now, now + 0.1, now
+            self._last_telemetry = 0.0; self._lost_emitted = False
+            self._target = (0.0, 0.0, 0.0); self._brake = True
+            self._timer.start()
+            self.connected.emit(port, baud, robot_id)
+        except Exception as exc:
+            self._serial = None
+            self.error.emit(str(exc))
+
+    def reconnect(self):
+        """Reopen the last selected endpoint using the current robot identity."""
+        port, baud, robot_id = self.state.port, self.state.baud, self.state.robot_id
+        if not port or not baud:
+            self.error.emit("Nenhuma conexão anterior disponível para reconectar")
+            return
+        self.connect_serial(port, baud, robot_id)
+
+    def disconnect_serial(self, send_brake=True):
+        self._timer.stop()
+        port = self._serial
+        if port:
+            try:
+                if send_brake and self.state.robot_id:
+                    self._sequence = (self._sequence + 1) & 0xFFFFFFFF
+                    port.write(Protocol.encode_velocity(self.state.robot_id, self._sequence,
+                                                        0.0, 0.0, 0.0, brake=1))
+                port.close()
+            except Exception:
+                try: port.close()
+                except Exception: pass
+        was_connected = self.state.connected
+        self._serial = None; self.state.connected = False; self.state.communication_status = "offline"
+        if was_connected: self.disconnected.emit()
+
+    def set_motion_target(self, vx, vy, omega, brake=False):
+        self._target = (float(vx), float(vy), float(omega)); self._brake = bool(brake)
+
+    def queue_kick(self, power):
+        self._kick_power = max(0, min(100, int(power))); self._kick_pending = True
+
+    def send_command(self, vx, vy, omega, kick_power=0, brake=False):
+        if not self.is_connected: return
+        self._sequence = (self._sequence + 1) & 0xFFFFFFFF
+        self._serial.write(Protocol.encode_velocity(self.state.robot_id, self._sequence,
+                                                    vx, vy, omega, kick_power, brake))
+        self.command_sent.emit(vx, vy, omega, self._sequence)
+
+    def emergency_stop(self):
+        self._target = (0.0, 0.0, 0.0); self._brake = True
+        self.state.vx = self.state.vy = self.state.omega = 0.0
+        try: self.send_command(0.0, 0.0, 0.0, brake=True)
+        except Exception as exc: self.error.emit(str(exc))
+
+    def send_telemetry_request(self):
+        if not self.is_connected: return
+        self._request_sequence = (self._request_sequence + 1) & 0xFFFF
+        self._serial.write(Protocol.encode_telemetry_request(self.state.robot_id,
+                                                             self._request_sequence))
+
+    def _limited_motion(self, now):
+        vx, vy, omega = self._target
+        elapsed = max(0.0, now - self._last_motion); self._last_motion = now
+        stopping = vx == vy == omega == 0.0
+        alpha = 1.0 - math.exp(-elapsed / (0.08 if stopping else 0.18))
+        self.state.vx += (vx - self.state.vx) * alpha
+        self.state.vy += (vy - self.state.vy) * alpha
+        self.state.omega += (omega - self.state.omega) * alpha
+        for name in ("vx", "vy", "omega"):
+            if abs(getattr(self.state, name)) < 1e-4: setattr(self.state, name, 0.0)
+        return self.state.vx, self.state.vy, self.state.omega
+
+    def _tick(self):
+        if not self.is_connected: return
+        try:
+            now = time.monotonic()
+            if now >= self._next_command:
+                motion = self._limited_motion(now)
+                kick = self._kick_power if self._kick_pending else 0
+                self.send_command(*motion, kick_power=kick,
+                                  brake=self._brake or motion == (0.0, 0.0, 0.0))
+                self._kick_pending = False; self._next_command = now + 0.05
+            if now >= self._next_telemetry:
+                self.send_telemetry_request(); self._next_telemetry = now + 0.2
+                self._next_command = max(self._next_command, now + Protocol.TELEMETRY_REPLY_WINDOW_S)
+            waiting = self._serial.in_waiting
+            if waiting:
+                self._rx.extend(self._serial.read(waiting))
+                data = Protocol.parse_telemetry(self._rx, self.state.robot_id)
+                if data:
+                    self._last_telemetry = now; self._lost_emitted = False
+                    self.state.apply_telemetry(data); self.history.append(data)
+                    self.telemetry_received.emit(data)
+            if self._last_telemetry and now - self._last_telemetry > 1.0 and not self._lost_emitted:
+                self._lost_emitted = True; self.telemetry_lost.emit()
+        except Exception as exc:
+            self.disconnect_serial(send_brake=False); self.error.emit(str(exc))
+
+    def _configure_async(self, action, port, baud, **values):
+        threading.Thread(target=self._configuration_worker,
+                         args=(action, port, baud, values), daemon=True).start()
+
+    def discover_boards(self, port, baud):
+        self._configure_async("discover", port, baud)
+
+    def configure_robot_id(self, port, baud, uid, robot_id):
+        self._configure_async("set-id", port, baud, uid=uid, robot_id=robot_id)
+
+    def configure_motion(self, port, baud, uid, linear_accel, angular_accel):
+        self._configure_async("set-motion", port, baud, uid=uid,
+                              linear_accel=linear_accel, angular_accel=angular_accel)
+
+    def _configuration_worker(self, action, port, baud, values):
+        try:
+            with serial.Serial(port, baud, timeout=0.05) as config_port:
+                time.sleep(0.25); config_port.reset_input_buffer()
+                if action == "discover":
+                    replies, received = [], 0
+                    for attempt in range(2):
+                        config_port.write(Protocol.encode_discovery(int(time.time() * 1000) + attempt)); config_port.flush()
+                        found, count = Protocol.read_config_responses(config_port, 1.2)
+                        replies.extend(found); received += count
+                    unique = {reply[2]: reply for reply in replies
+                              if reply[1] == Protocol.CONFIG_DISCOVER_RESPONSE_TYPE}
+                    self.boards_discovered.emit(list(unique.values()), received)
+                elif action == "set-id":
+                    uid = Protocol.parse_uid(values["uid"])
+                    config_port.write(Protocol.encode_set_id(uid, values["robot_id"])); config_port.flush()
+                    replies, _ = Protocol.read_config_responses(config_port, 1.0)
+                    reply = next((v for v in replies if v[1] == Protocol.CONFIG_SET_ID_RESPONSE_TYPE and v[2] == uid), None)
+                    if reply is None: raise RuntimeError("A placa não respondeu ao pedido de configuração")
+                    if reply[3] == 0: raise RuntimeError("A placa não conseguiu gravar o ID na Flash")
+                    self.board_configured.emit(values["robot_id"])
+                else:
+                    uid = Protocol.parse_uid(values["uid"])
+                    config_port.write(Protocol.encode_motion_config(uid, values["linear_accel"], values["angular_accel"])); config_port.flush()
+                    replies, _ = Protocol.read_config_responses(config_port, 1.0)
+                    reply = next((v for v in replies if v[1] == Protocol.CONFIG_SET_MOTION_RESPONSE_TYPE and v[2] == uid), None)
+                    if reply is None: raise RuntimeError("A placa não respondeu à configuração de movimento")
+                    if reply[3] == 0: raise RuntimeError("A placa rejeitou os limites de aceleração")
+                    self.motion_configured.emit(values["linear_accel"], values["angular_accel"])
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            self.configuration_finished.emit()

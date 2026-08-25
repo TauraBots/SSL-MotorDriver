@@ -1,0 +1,246 @@
+"""Application composition root. UI code never accesses serial bytes."""
+
+import csv
+import os
+import threading
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QStackedWidget, QStyle, QVBoxLayout, QWidget
+
+from core import RadioManager, telemetry_csv_row
+from core.telemetry import CSV_HEADER
+from .analysis_panel import AnalysisPanel
+from .config_panel import ConfigPanel
+from .control_panel import ControlPanel
+from .dashboard import DashboardPanel
+from .diagnostics_panel import DiagnosticsPanel
+from .fleet_panel import FleetPanel
+from .telemetry_panel import TelemetryPanel
+from .widgets import HeaderStatusItem
+
+
+class MainWindow(QMainWindow):
+    plots_ready = Signal(str)
+
+    def __init__(self, args, parent=None):
+        super().__init__(parent); self.args = args; self.manager = RadioManager(self); self.pressed_keys = set(); self.discovered_boards = []
+        self.log_file = self.log_writer = None; self.config_busy = False
+        self.setWindowTitle("TauraBots Robot Control Center"); self.resize(1120, 740); self.setMinimumSize(920, 640)
+        theme = Path(__file__).parents[1] / "styles" / "theme.qss"; self.setStyleSheet(theme.read_text(encoding="utf-8"))
+        self._build(); self._connect_signals(); self.refresh_ports(); QApplication.instance().installEventFilter(self)
+
+    def _build(self):
+        root = QWidget(); outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        header = QFrame(); header.setObjectName("header"); row = QHBoxLayout(header); row.setContentsMargins(24, 14, 24, 14)
+        brand = QVBoxLayout(); title = QLabel("TAURABOTS CONTROL CENTER"); title.setObjectName("brand"); brand.addWidget(title)
+        subtitle = QLabel("SSL MOTOR DRIVER"); subtitle.setObjectName("eyebrow"); brand.addWidget(subtitle); row.addLayout(brand); row.addStretch()
+        self.radio_status = HeaderStatusItem("Radio link", "OFFLINE"); self.robots_status = HeaderStatusItem("Robots online", "0"); self.target_status = HeaderStatusItem("Control target", "NONE"); self.latency_status = HeaderStatusItem("Link latency", "—"); self.system_status = HeaderStatusItem("System status", "OFFLINE")
+        for widget in (self.radio_status, self.robots_status, self.target_status, self.latency_status, self.system_status): row.addWidget(widget)
+        outer.addWidget(header)
+        body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
+        sidebar = QFrame(); sidebar.setObjectName("sidebar"); sidebar.setFixedWidth(205); navigation = QVBoxLayout(sidebar); navigation.setContentsMargins(14, 20, 14, 18)
+        icons = {"connection": self.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon),
+                 "battery": self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon),
+                 "robot": self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
+                 "warning": self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning),
+                 "motor": self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)}
+        self.stack = QStackedWidget(); self.dashboard = DashboardPanel(icons); self.fleet = FleetPanel(); self.control = ControlPanel(self.args); self.telemetry = TelemetryPanel(); self.config = ConfigPanel(); self.diagnostics = DiagnosticsPanel(); self.analysis = AnalysisPanel()
+        pages = (("VISÃO GERAL", self.dashboard, QStyle.StandardPixmap.SP_ComputerIcon),
+                 ("FLEET", self.fleet, QStyle.StandardPixmap.SP_DirIcon),
+                 ("CONTROLE", self.control, QStyle.StandardPixmap.SP_MediaPlay),
+                 ("TELEMETRIA", self.telemetry, QStyle.StandardPixmap.SP_FileDialogDetailedView),
+                 ("CONFIGURAÇÃO", self.config, QStyle.StandardPixmap.SP_FileDialogContentsView),
+                 ("DIAGNÓSTICO", self.diagnostics, QStyle.StandardPixmap.SP_MessageBoxWarning),
+                 ("ANÁLISE DE DADOS", self.analysis, QStyle.StandardPixmap.SP_FileDialogInfoView)); self.nav_buttons = []
+        for index, (name, page, icon) in enumerate(pages):
+            button = QPushButton(self.style().standardIcon(icon), name); button.setObjectName("nav"); button.setCheckable(True); button.clicked.connect(lambda checked=False, i=index: self.navigate(i)); navigation.addWidget(button); self.nav_buttons.append(button); self.stack.addWidget(page)
+        navigation.addStretch(); stop = QPushButton("EMERGENCY STOP"); stop.setProperty("danger", True); stop.setMinimumHeight(48); stop.clicked.connect(self.emergency_stop); navigation.addWidget(stop)
+        body.addWidget(sidebar); body.addWidget(self.stack, 1); outer.addLayout(body, 1); self.setCentralWidget(root)
+        self.footer_status = QLabel("NO PORT  |  — BAUD  |  ROBOT —  |  FIRMWARE —  |  OFFLINE"); self.footer_status.setObjectName("footerStatus")
+        self.statusBar().addWidget(self.footer_status, 1); self.navigate(0)
+
+    def _connect_signals(self):
+        self.control.connect_requested.connect(self.toggle_connection); self.control.refresh_requested.connect(self.refresh_ports); self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
+        self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
+        self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(lambda message: self.show_error("Comunicação", message))
+        self.manager.boards_discovered.connect(self.show_boards); self.manager.board_configured.connect(self.configuration_succeeded); self.manager.motion_configured.connect(self.motion_configuration_succeeded); self.manager.configuration_finished.connect(self.finish_config_action); self.plots_ready.connect(self.on_plots_ready)
+        self.manager.robots.system_state_changed.connect(self.update_system_header); self.manager.robots.fleet_changed.connect(self.update_fleet); self.manager.robots.active_robot_changed.connect(self.active_robot_changed)
+
+    def navigate(self, index):
+        self.stack.setCurrentIndex(index)
+        for i, button in enumerate(self.nav_buttons): button.setChecked(i == index)
+
+    def update_system_header(self, state):
+        self.radio_status.set_status("CONNECTED" if state.radio_connected else "OFFLINE", "ok" if state.radio_connected else "error")
+        self.robots_status.set_status(str(state.online_robot_count), "ok" if state.online_robot_count else "off")
+        self.target_status.set_status(f"ROBOT {state.active_robot_id}" if state.active_robot_id else "NONE", "ok" if state.active_robot_id else "warning")
+        self.latency_status.set_status(f"{state.latency_ms} ms" if state.latency_ms is not None else "NO DATA", "ok" if state.latency_ms is not None and state.latency_ms < 100 else "warning")
+        system_state = "ok" if state.system_status == "READY" else "warning" if state.system_status == "WARNING" else "error"
+        self.system_status.set_status(state.system_status, system_state)
+
+    def update_fleet(self, robots):
+        self.fleet.set_fleet(robots, self.manager.robots.system_state.active_robot_id)
+
+    def active_robot_changed(self, robot):
+        available = robot is not None and robot.connected and self.manager.is_connected
+        self.dashboard.set_robot(robot); self.control.set_active_robot(robot.robot_id if available else None)
+        if robot: self.control.robot.setCurrentText(robot.robot_id)
+        self.update_fleet(self.manager.robots.robots)
+
+    def select_fleet_robot(self, robot_id):
+        self.manager.select_robot(robot_id); self.toast(f"Control target changed to Robot {robot_id}", "info")
+
+    def can_control(self):
+        robot = self.manager.robots.active_robot
+        return self.manager.is_connected and robot is not None and robot.connected
+
+    def queue_kick(self, power):
+        if self.can_control(): self.manager.queue_kick(power)
+
+    def refresh_ports(self):
+        current = self.control.port.currentText(); ports = self.manager.available_ports()
+        self.control.port.clear(); self.control.port.addItems(ports)
+        if current: self.control.port.setCurrentText(current)
+        elif self.args.port: self.control.port.setCurrentText(self.args.port)
+
+    def serial_settings(self):
+        port = self.control.port.currentText().strip()
+        if not port: raise ValueError("Selecione uma porta serial")
+        baud = int(self.control.baud.currentText());
+        if baud <= 0: raise ValueError("Baud rate inválido")
+        return port, baud
+
+    def toggle_connection(self):
+        if self.manager.is_connected: self.manager.disconnect_serial(); return
+        try: port, baud = self.serial_settings()
+        except Exception as exc: self.show_error("Conexão", str(exc)); return
+        self.manager.connect_serial(port, baud, self.control.robot.currentText())
+
+    def on_connected(self, port, baud, robot_id):
+        self.control.connect_button.setText("DESCONECTAR"); self.control.robot.setEnabled(False); self.control.status.setText("COMANDO ATIVO"); self.footer_status.setText(f"{port}  |  {baud} BAUD  |  AIRPORT ONLINE"); self.active_robot_changed(self.manager.robots.active_robot); self.toast(f"Radio connected; Robot {robot_id} active", "success")
+
+    def on_disconnected(self):
+        self.pressed_keys.clear(); [self.control.set_key(key, False) for key in self.control.keys]
+        self.control.connect_button.setText("CONECTAR"); self.control.robot.setEnabled(True); self.control.status.setText("AGUARDANDO CONEXÃO"); self.footer_status.setText("NO RADIO LINK  |  AIRPORT OFFLINE"); self.control.set_active_robot(None); self.dashboard.set_robot(None)
+
+    def _update_target(self):
+        if not self.can_control(): return
+        vx = (2.0 if "d" in self.pressed_keys else 0.0) - (2.0 if "a" in self.pressed_keys else 0.0)
+        vy = (2.0 if "w" in self.pressed_keys else 0.0) - (2.0 if "s" in self.pressed_keys else 0.0)
+        omega = (5.0 if "q" in self.pressed_keys else 0.0) - (5.0 if "e" in self.pressed_keys else 0.0)
+        if "space" in self.pressed_keys: vx = vy = omega = 0.0
+        self.manager.set_motion_target(vx, vy, omega, brake=(vx == vy == omega == 0.0))
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and not event.isAutoRepeat():
+            key = {Qt.Key.Key_W: "w", Qt.Key.Key_A: "a", Qt.Key.Key_S: "s", Qt.Key.Key_D: "d", Qt.Key.Key_Q: "q", Qt.Key.Key_E: "e", Qt.Key.Key_Space: "space", Qt.Key.Key_K: "k"}.get(event.key())
+            if key:
+                pressed = event.type() == QEvent.Type.KeyPress
+                if key == "k" and pressed: self.queue_kick(self.control.kick.value())
+                elif pressed: self.pressed_keys.add(key)
+                else: self.pressed_keys.discard(key)
+                self.control.set_key(key, pressed); self._update_target(); return True
+        return super().eventFilter(obj, event)
+
+    def set_virtual_key(self, key, pressed):
+        self.pressed_keys.add(key) if pressed else self.pressed_keys.discard(key); self.control.set_key(key, pressed); self._update_target()
+
+    def set_joystick_command(self, vx, vy, omega):
+        if self.can_control() and not self.pressed_keys: self.manager.set_motion_target(vx, vy, omega, brake=(vx == vy == omega == 0.0))
+
+    def emergency_stop(self):
+        self.pressed_keys.clear(); [self.control.set_key(key, False) for key in self.control.keys]; self.control.reset_joystick(); self.manager.emergency_stop(); self.toast("STOP ROBOT sent · brake active", "error")
+
+    def command_sent(self, vx, vy, omega, sequence):
+        self.control.set_command(vx, vy, omega); self.dashboard.set_command(vx, vy, omega); self.telemetry.append_command(vx, vy, omega); self.diagnostics.tx.setText(str(sequence))
+
+    def update_telemetry(self, data):
+        latency = max(0, int((time.monotonic() - data.get("received_at", time.monotonic())) * 1000))
+        if data.get("robot_id") == self.manager.robots.system_state.active_robot_id:
+            self.telemetry.update_telemetry(data, latency); self.dashboard.set_telemetry(data, latency); self.diagnostics.update_telemetry(data, latency)
+        if self.log_writer: self.log_writer.writerow(telemetry_csv_row(data)); self.log_file.flush()
+
+    def telemetry_lost(self):
+        self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning"); self.dashboard.watchdog_card.update_status("WARNING", "TELEMETRY LOST", "warning"); self.diagnostics.watchdog.setText("TELEMETRIA PERDIDA"); self.toast("Telemetry lost", "warning")
+
+    def toggle_log(self):
+        if self.log_file:
+            self.log_file.close(); self.log_file = self.log_writer = None; self.telemetry.log_status.setText("CSV desligado"); self.telemetry.log_button.setText("GRAVAR CSV"); return
+        path, _ = QFileDialog.getSaveFileName(self, "Gravar telemetria", "telemetry.csv", "CSV (*.csv)")
+        if path:
+            self.log_file = open(path, "w", newline="", encoding="utf-8"); self.log_writer = csv.writer(self.log_file); self.log_writer.writerow(CSV_HEADER); self.telemetry.log_status.setText(path); self.telemetry.log_button.setText("PARAR GRAVAÇÃO")
+
+    def _begin_config(self):
+        if self.config_busy: return None
+        if self.manager.is_connected: self.manager.disconnect_serial()
+        try: settings = self.serial_settings()
+        except Exception as exc: self.show_error("Configuração", str(exc)); return None
+        self.config_busy = True; self.config.set_busy(True); return settings
+
+    def discover(self):
+        settings = self._begin_config()
+        if settings: self.config.boards.clear(); self.config.boards.addItem("Procurando placas…"); self.manager.discover_boards(*settings)
+
+    def set_id(self):
+        try: self.manager.validate_uid(self.config.uid.text().strip())
+        except ValueError as exc: self.show_error("Configuração", str(exc)); return
+        settings = self._begin_config()
+        if settings: self.manager.configure_robot_id(*settings, self.config.uid.text().strip(), self.config.robot_id.currentText())
+
+    def set_motion(self):
+        try: self.manager.validate_uid(self.config.uid.text().strip())
+        except ValueError as exc: self.show_error("Configuração", str(exc)); return
+        settings = self._begin_config()
+        if settings: self.manager.configure_motion(*settings, self.config.uid.text().strip(), self.config.linear.value(), self.config.angular.value())
+
+    def finish_config_action(self): self.config_busy = False; self.config.set_busy(False)
+
+    def show_boards(self, values, received):
+        self.config.boards.clear(); self.discovered_boards = list(values)
+        if not self.discovered_boards: self.config.boards.addItem(f"Nenhuma resposta válida · {received} byte(s) recebidos"); self.config.discovery_status.setText("0 placas encontradas"); return
+        ids = [chr(v[4]) for v in self.discovered_boards if ord("A") <= v[4] <= ord("Z")]; self.config.discovery_status.setText(f"{len(self.discovered_boards)} placa(s) · IDs: {', '.join(sorted(set(ids))) or 'nenhum'}")
+        for value in self.discovered_boards: self.config.boards.addItem(f"{value[2].hex().upper()}    ID: {chr(value[4]) if ord('A') <= value[4] <= ord('Z') else 'NÃO CONFIGURADO'}    geração: {value[5]}")
+
+    def select_board(self, index):
+        if 0 <= index < len(self.discovered_boards):
+            value = self.discovered_boards[index]; self.config.uid.setText(value[2].hex().upper()); self.config.set_actions_enabled(True)
+            if ord("A") <= value[4] <= ord("Z"): self.control.robot.setCurrentText(chr(value[4])); self.config.robot_id.setCurrentText(chr(value[4]))
+
+    def configuration_succeeded(self, robot_id): self.control.robot.setCurrentText(robot_id); self.config.robot_id.setCurrentText(robot_id); self.toast(f"Robot ID {robot_id} saved", "success")
+    def motion_configuration_succeeded(self, linear, angular): self.toast(f"Motion limits saved · {linear:.2f} m/s² · {angular:.2f} rad/s²", "success")
+
+    def generate_plots(self, path):
+        if not path: self.show_error("Análise", "Selecione um arquivo CSV"); return
+        self.analysis.status.setText("Gerando gráficos…"); threading.Thread(target=self._plot_worker, args=(path,), daemon=True).start()
+
+    def _plot_worker(self, path):
+        try:
+            import matplotlib.pyplot as plt
+            import pandas as pd
+            csv_path = Path(path); output = csv_path.parent / f"{csv_path.stem}_plots"; output.mkdir(parents=True, exist_ok=True); frame = pd.read_csv(csv_path)
+            if frame.empty: raise ValueError("O CSV está vazio")
+            timeline = (frame["mcu_time_ms"] - frame["mcu_time_ms"].iloc[0]) / 1000.0
+            for i in range(1, 5): frame[f"rpm{i}"] = frame[f"rpm{i}_x10"] / 10.0
+            frame["battery_v"] = frame["battery_mV"] / 1000.0
+            for name, columns in (("rpm.png", [f"rpm{i}" for i in range(1, 5)]), ("cmd.png", [f"cmd{i}" for i in range(1, 5)]), ("battery.png", ["battery_v"])):
+                plt.figure(figsize=(12, 5)); [plt.plot(timeline, frame[column], label=column) for column in columns]; plt.grid(True, alpha=.3); plt.legend(); plt.tight_layout(); plt.savefig(output / name, dpi=140); plt.close()
+            self.plots_ready.emit(f"{len(frame)} amostras · {output}")
+        except Exception as exc: self.plots_ready.emit(f"Erro: {exc}")
+
+    def on_plots_ready(self, message):
+        self.analysis.status.setText(message)
+        if not message.startswith("Erro:") and hasattr(os, "startfile"): os.startfile(message.split(" · ", 1)[1])
+
+    def toast(self, message, level="info"):
+        colors = {"info": "#2bc3dc", "success": "#43d39e", "warning": "#ffb454", "error": "#ff6577"}
+        if not hasattr(self, "toast_label"): self.toast_label = QLabel(self); self.toast_label.setMinimumWidth(320); self.toast_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.toast_label.setText(message); self.toast_label.setStyleSheet(f"background:#111d2e;color:white;border-left:4px solid {colors[level]};padding:12px;border-radius:6px;font-weight:600"); self.toast_label.adjustSize(); self.toast_label.move(self.width() - self.toast_label.width() - 28, 76); self.toast_label.show(); self.toast_label.raise_(); QTimer.singleShot(3200, self.toast_label.hide)
+
+    def show_error(self, title, message): self.toast(f"{title}: {message}", "error"); QMessageBox.critical(self, title, message)
+
+    def closeEvent(self, event):
+        self.manager.disconnect_serial()
+        if self.log_file: self.log_file.close()
+        event.accept()
