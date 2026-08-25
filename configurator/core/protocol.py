@@ -11,6 +11,14 @@ import time
 class Protocol:
     ROBOT_VELOCITY_TYPE = 0xD0
     ROBOT_VELOCITY_VERSION = 1
+    AUTOTUNE_CONTROL_TYPE = 0xD1
+    AUTOTUNE_VERSION = 1
+    AUTOTUNE_ACTION_START = 1
+    AUTOTUNE_ACTION_ABORT = 2
+    AUTOTUNE_ACTION_PREVIEW = 3
+    AUTOTUNE_ACTION_STAGE = 4
+    AUTOTUNE_ACTION_RESTORE = 5
+    AUTOTUNE_ACTION_COMMIT_STAGED = 6
     TELEMETRY_REQUEST_TYPE = 0xE0
     TELEMETRY_RESPONSE_TYPE = 0xE1
     DISCOVERY_REQUEST_TYPE = 0xE2
@@ -20,8 +28,10 @@ class Protocol:
     TELEMETRY_FLAG_MOTORS = 1 << 1
     TELEMETRY_FLAG_BATTERY = 1 << 2
     TELEMETRY_FLAG_DIAGNOSTICS = 1 << 3
-    TELEMETRY_FLAGS_FULL = 0x0F
-    TELEMETRY_REPLY_WINDOW_S = 0.080
+    TELEMETRY_FLAG_AUTOTUNE = 1 << 4
+    TELEMETRY_FLAG_AUTOTUNE_DETAIL = 1 << 5
+    TELEMETRY_FLAGS_FULL = 0x3F
+    TELEMETRY_REPLY_WINDOW_S = 0.100
     TELEMETRY_RESPONSE_BASE_SIZE = 11
     DISCOVERY_VERSION = 1
     DISCOVERY_REQUEST_SIZE = 8
@@ -64,6 +74,25 @@ class Protocol:
         payload = struct.pack("<HBBBIhhhBB", 0xAA55, cls.ROBOT_VELOCITY_TYPE,
                               cls.ROBOT_VELOCITY_VERSION, ord(robot_id), sequence & 0xFFFFFFFF,
                               *values, kick_power, 1 if brake else 0)
+        return cls.with_crc(payload)
+
+    @classmethod
+    def encode_motor_setpoints(cls, robot_id, sequence, motor_rpm, brake=0):
+        if len(motor_rpm) != 4:
+            raise ValueError("motor_rpm must contain four values")
+        values = tuple(max(-32768, min(32767, int(round(value))))
+                       for value in motor_rpm)
+        payload = struct.pack("<HBIhhhhBB", 0xAA55, ord(robot_id),
+                              sequence & 0xFFFFFFFF, *values, 0,
+                              1 if brake else 0)
+        return cls.with_crc(payload)
+
+    @classmethod
+    def encode_autotune_control(cls, robot_id, sequence, motor_id,
+                                action=AUTOTUNE_ACTION_START):
+        payload = struct.pack("<HBBBIBB", 0xAA55, cls.AUTOTUNE_CONTROL_TYPE,
+                              cls.AUTOTUNE_VERSION, ord(robot_id), sequence & 0xFFFFFFFF,
+                              action, motor_id)
         return cls.with_crc(payload)
 
     @classmethod
@@ -133,6 +162,8 @@ class Protocol:
             size += 16 if flags & cls.TELEMETRY_FLAG_MOTORS else 0
             size += 4 if flags & cls.TELEMETRY_FLAG_BATTERY else 0
             size += 13 if flags & cls.TELEMETRY_FLAG_DIAGNOSTICS else 0
+            size += 24 if flags & cls.TELEMETRY_FLAG_AUTOTUNE else 0
+            size += 28 if flags & cls.TELEMETRY_FLAG_AUTOTUNE_DETAIL else 0
             if len(rx_buffer) < size:
                 break
             frame = bytes(rx_buffer[:size])
@@ -160,6 +191,26 @@ class Protocol:
                 latest["crc_errors"], latest["received_packets"] = struct.unpack_from("<II", frame, offset); offset += 8
                 latest["watchdog_ok"] = frame[offset]; offset += 1
                 latest["command_sequence"] = struct.unpack_from("<I", frame, offset)[0]
+                offset += 4
+            if flags & cls.TELEMETRY_FLAG_AUTOTUNE:
+                motor, state, error, active = struct.unpack_from("<BBBB", frame, offset); offset += 4
+                tu, ku, kp, ki, kd = struct.unpack_from("<fffff", frame, offset); offset += 20
+                latest["autotune"] = {"motor": motor, "state": state, "error": error,
+                                      "active": active, "tu": tu, "ku": ku,
+                                      "kp": kp, "ki": ki, "kd": kd}
+            if flags & cls.TELEMETRY_FLAG_AUTOTUNE_DETAIL:
+                elapsed, completed, usable, stability, stable_windows = struct.unpack_from(
+                    "<IBBBB", frame, offset); offset += 8
+                high, low, period_spread, high_spread, low_spread = struct.unpack_from(
+                    "<fffff", frame, offset); offset += 20
+                latest["autotune_detail"] = {
+                    "elapsed_ms": elapsed, "completed_periods": completed,
+                    "usable_periods": usable, "stability_flags": stability,
+                    "stable_windows": stable_windows,
+                    "average_high_rpm": high, "average_low_rpm": low,
+                    "period_spread": period_spread,
+                    "high_peak_spread": high_spread,
+                    "low_peak_spread": low_spread}
         return latest
 
     @classmethod

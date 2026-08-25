@@ -56,11 +56,21 @@ class RadioManager(SerialManager):
                                     if sent_at - request[0] < 5.0}
 
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
+        if self.autotune_active:
+            return
         active = self.robots.active_robot
         if active is None or not active.connected:
             return
         self.state.robot_id = active.robot_id
         super().send_command(vx, vy, omega, kick_power, brake)
+
+    def start_autotune(self, motor_id, action=Protocol.AUTOTUNE_ACTION_START):
+        active = self.robots.active_robot
+        if active is None or not active.connected:
+            self.error.emit("Selecione um robô online antes do Auto-Tune")
+            return False
+        self.state.robot_id = active.robot_id
+        return super().start_autotune(motor_id, action)
 
     def disconnect_serial(self, send_brake=True):
         active = self.robots.active_robot if hasattr(self, "robots") else None
@@ -157,6 +167,8 @@ class RadioManager(SerialManager):
                 size += 16 if flags & Protocol.TELEMETRY_FLAG_MOTORS else 0
                 size += 4 if flags & Protocol.TELEMETRY_FLAG_BATTERY else 0
                 size += 13 if flags & Protocol.TELEMETRY_FLAG_DIAGNOSTICS else 0
+                size += 24 if flags & Protocol.TELEMETRY_FLAG_AUTOTUNE else 0
+                size += 28 if flags & Protocol.TELEMETRY_FLAG_AUTOTUNE_DETAIL else 0
             else:
                 next_start = self._rx.find(b"\x55\xAA", 2)
                 if next_start < 0:
@@ -193,6 +205,7 @@ class RadioManager(SerialManager):
                 data["latency_ms"] = max(0, int((now - request[0]) * 1000))
                 self._last_telemetry = now; self._lost_emitted = False
                 if data["robot_id"] == self.state.robot_id: self.state.apply_telemetry(data)
+                self._finish_autotune_from_telemetry(data)
                 self.history.append(data); self.telemetry_received.emit(data)
 
     def select_robot(self, robot_id):

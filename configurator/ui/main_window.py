@@ -10,9 +10,10 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
-from core import RadioManager, telemetry_csv_row
+from core import Protocol, RadioManager, telemetry_csv_row
 from core.telemetry import CSV_HEADER
 from .analysis_panel import AnalysisPanel
+from .autotune_panel import AutoTunePanel
 from .config_panel import ConfigPanel
 from .control_panel import ControlPanel
 from .dashboard import DashboardPanel
@@ -62,12 +63,13 @@ class MainWindow(QMainWindow):
         svg = lambda name: QIcon(str(icon_dir / f"{name}.svg"))
         icons = {"connection": svg("radio"), "battery": svg("battery"), "robot": svg("robot"),
                  "warning": svg("diagnostics"), "motor": svg("motor")}
-        self.stack = QStackedWidget(); self.dashboard = DashboardPanel(icons); self.fleet = FleetPanel(); self.control = ControlPanel(self.args); self.telemetry = TelemetryPanel(); self.config = ConfigPanel(); self.diagnostics = DiagnosticsPanel(); self.analysis = AnalysisPanel()
+        self.stack = QStackedWidget(); self.dashboard = DashboardPanel(icons); self.fleet = FleetPanel(); self.control = ControlPanel(self.args); self.telemetry = TelemetryPanel(); self.config = ConfigPanel(); self.autotune = AutoTunePanel(); self.diagnostics = DiagnosticsPanel(); self.analysis = AnalysisPanel()
         pages = (("VISÃO GERAL", self.dashboard, svg("robot")),
                  ("FLEET", self.fleet, svg("radio")),
                  ("CONTROLE", self.control, svg("motor")),
                  ("TELEMETRIA", self.telemetry, svg("chart")),
                  ("CONFIGURAÇÃO", self.config, svg("settings")),
+                 ("AUTO-TUNE PID", self.autotune, svg("motor")),
                  ("DIAGNÓSTICO", self.diagnostics, svg("diagnostics")),
                  ("ANÁLISE DE DADOS", self.analysis, svg("chart"))); self.nav_buttons = []
         for index, (name, page, icon) in enumerate(pages):
@@ -80,11 +82,13 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.header_connect.clicked.connect(self.toggle_connection); self.header_refresh.clicked.connect(self.refresh_ports)
         self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
+        self.autotune.start_requested.connect(self.start_autotune); self.autotune.abort_requested.connect(self.abort_autotune); self.autotune.restore_requested.connect(self.restore_pid_configs); self.autotune.commit_requested.connect(self.commit_staged_pid_configs)
         self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.fleet.discovery_requested.connect(self.manager.discover_robots); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
         self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(self.on_communication_error)
         self.manager.boards_discovered.connect(self.show_boards); self.manager.board_configured.connect(self.configuration_succeeded); self.manager.motion_configured.connect(self.motion_configuration_succeeded); self.manager.configuration_finished.connect(self.finish_config_action); self.plots_ready.connect(self.on_plots_ready)
         self.manager.robots.system_state_changed.connect(self.update_system_header); self.manager.robots.fleet_changed.connect(self.update_fleet); self.manager.robots.active_robot_changed.connect(self.active_robot_changed)
         self.manager.discovery_started.connect(lambda: self.fleet.set_discovering(True)); self.manager.discovery_finished.connect(self.discovery_finished)
+        self.manager.autotune_started.connect(self.autotune_started); self.manager.autotune_finished.connect(self.autotune_finished); self.manager.autotune_aborted.connect(self.autotune_aborted)
 
     def navigate(self, index):
         self.stack.setCurrentIndex(index)
@@ -101,7 +105,8 @@ class MainWindow(QMainWindow):
         self.fleet.set_fleet(robots, self.manager.robots.system_state.active_robot_id)
         active = self.manager.robots.active_robot
         self.dashboard.set_robot(active)
-        available = active is not None and active.connected and self.manager.is_connected
+        available = (active is not None and active.connected and self.manager.is_connected and
+                     not self.manager.autotune_active)
         self.control.set_active_robot(active.robot_id if available else None)
         if active is not None and not active.connected:
             self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning")
@@ -111,10 +116,13 @@ class MainWindow(QMainWindow):
 
     def active_robot_changed(self, robot):
         available = robot is not None and robot.connected and self.manager.is_connected
-        self.dashboard.set_robot(robot); self.control.set_active_robot(robot.robot_id if available else None)
+        self.dashboard.set_robot(robot); self.control.set_active_robot(robot.robot_id if available else None); self.autotune.set_available(robot.robot_id if available else None)
         self.update_fleet(self.manager.robots.robots)
 
     def select_fleet_robot(self, robot_id):
+        if self.manager.autotune_active:
+            self.toast(f"Auto-Tune ativo no Robot {self.manager.autotune_robot_id}; aborte antes de trocar o alvo", "warning")
+            return
         robot = self.manager.robots.ensure_robot(robot_id)
         if not robot.connected:
             self.warn_no_control_target(); return
@@ -124,13 +132,17 @@ class MainWindow(QMainWindow):
 
     def can_control(self):
         robot = self.manager.robots.active_robot
-        return self.manager.is_connected and robot is not None and robot.connected
+        return (self.manager.is_connected and robot is not None and robot.connected and
+                not self.manager.autotune_active)
 
     def queue_kick(self, power):
         if self.can_control(): self.manager.queue_kick(power)
         else: self.warn_no_control_target()
 
     def warn_no_control_target(self):
+        if self.manager.autotune_active:
+            self.toast("Controle de movimento bloqueado durante o Auto-Tune", "warning")
+            return
         now = time.monotonic()
         if now - self._last_target_warning < 1.0: return
         self._last_target_warning = now
@@ -161,7 +173,7 @@ class MainWindow(QMainWindow):
 
     def on_disconnected(self):
         self.pressed_keys.clear(); [self.control.set_key(key, False) for key in self.control.keys]
-        self.header_connect.setText("CONNECT"); self.header_port.setEnabled(True); self.header_baud.setEnabled(True); self.header_refresh.setEnabled(True); self.control.status.setText("AGUARDANDO CONEXÃO"); self.footer_status.setText("NO RADIO LINK  |  AIRPORT OFFLINE"); self.control.set_active_robot(None); self.dashboard.set_robot(None)
+        self.header_connect.setText("CONNECT"); self.header_port.setEnabled(True); self.header_baud.setEnabled(True); self.header_refresh.setEnabled(True); self.control.status.setText("AGUARDANDO CONEXÃO"); self.footer_status.setText("NO RADIO LINK  |  AIRPORT OFFLINE"); self.control.set_active_robot(None); self.dashboard.set_robot(None); self.autotune.reset()
 
     def on_communication_error(self, message):
         if not self.manager.is_connected:
@@ -208,12 +220,84 @@ class MainWindow(QMainWindow):
         if latency is None: latency = 0
         if data.get("robot_id") == self.manager.robots.system_state.active_robot_id:
             self.telemetry.update_telemetry(data, latency); self.dashboard.set_telemetry(data, latency); self.diagnostics.update_telemetry(data, latency)
+            autotune_data = data
+            if not self.manager.autotune_telemetry_is_current(data):
+                autotune_data = dict(data); autotune_data.pop("autotune", None)
+            self.autotune.update_telemetry(autotune_data)
         if self.log_writer: self.log_writer.writerow(telemetry_csv_row(data)); self.log_file.flush()
 
     def telemetry_lost(self):
         active = self.manager.robots.active_robot
         if active is not None and not active.connected:
             self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning"); self.dashboard.watchdog_card.update_status("WARNING", "TELEMETRY LOST", "warning"); self.diagnostics.watchdog.setText("TELEMETRIA PERDIDA"); self.toast("Telemetry lost", "warning")
+
+    def start_autotune(self, motor_id, action):
+        if not self.can_control():
+            self.warn_no_control_target()
+            return
+        target = "todos os motores em sequência" if motor_id == 0 else f"o motor {motor_id}"
+        mode_text = {
+            Protocol.AUTOTUNE_ACTION_PREVIEW: "Os ganhos serão apenas medidos; nada será aplicado ou salvo.",
+            Protocol.AUTOTUNE_ACTION_STAGE: "Os ganhos serão aplicados só em RAM e poderão ser restaurados.",
+            Protocol.AUTOTUNE_ACTION_START: "Os ganhos serão aplicados e gravados na Flash.",
+        }.get(action, "")
+        answer = QMessageBox.question(
+            self, "Iniciar Auto-Tune PID",
+            f"Confirma o Auto-Tune de {target}?\n\n"
+            "O robô deve estar suspenso e as rodas não podem tocar o piso. "
+            "O sentido do motor será alternado automaticamente por pelo menos "
+            f"8 segundos (timeout de 30 segundos por motor).\n\n{mode_text}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.pressed_keys.clear()
+        [self.control.set_key(key, False) for key in self.control.keys]
+        self.control.reset_joystick()
+        self.manager.set_motion_target(0.0, 0.0, 0.0, brake=True)
+        self.manager.start_autotune(motor_id, action)
+
+    def restore_pid_configs(self):
+        if self.manager.restore_pid_configs():
+            self.autotune.set_restored()
+            self.toast("Ganhos PID restaurados da Flash", "success")
+
+    def commit_staged_pid_configs(self, motor_id):
+        target = "todos os candidatos" if motor_id == 0 else f"o candidato do motor {motor_id}"
+        answer = QMessageBox.question(
+            self, "Salvar candidato validado",
+            f"Gravar {target} que está em RAM na Flash?\n\n"
+            "Use somente após validar os degraus positivo e negativo.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if (answer == QMessageBox.StandardButton.Yes and
+                self.manager.commit_staged_pid_configs(motor_id)):
+            self.autotune.set_commit_requested()
+            self.toast("Solicitação de gravação enviada", "info")
+
+    def abort_autotune(self):
+        if self.manager.abort_autotune():
+            self.toast("Auto-Tune abortado; motores freados", "warning")
+
+    def autotune_started(self, robot_id, motor_id):
+        self.autotune.set_running(robot_id, motor_id)
+        self.control.set_active_robot(None)
+        self.toast(f"Auto-Tune iniciado no Robot {robot_id}", "info")
+
+    def autotune_finished(self, robot_id, result):
+        state = int(result.get("state", 0))
+        if state == 2:
+            self.toast(f"Auto-Tune do Robot {robot_id} concluído", "success")
+        else:
+            error = self.autotune.ERROR_NAMES.get(int(result.get("error", 0)), "UNKNOWN")
+            self.toast(f"Auto-Tune do Robot {robot_id} falhou: {error}", "error")
+        active = self.manager.robots.active_robot
+        self.control.set_active_robot(active.robot_id if active and active.connected else None)
+
+    def autotune_aborted(self, robot_id):
+        self.autotune.set_aborted()
+        active = self.manager.robots.active_robot
+        self.control.set_active_robot(active.robot_id if active and active.connected else None)
 
     def toggle_log(self):
         if self.log_file:

@@ -26,6 +26,7 @@ class RobotState:
     vx: float = 0.0
     vy: float = 0.0
     omega: float = 0.0
+    autotune: dict = field(default_factory=dict)
 
     def apply_telemetry(self, data):
         self.battery_voltage = data.get("battery_v", self.battery_voltage)
@@ -34,6 +35,7 @@ class RobotState:
         self.sequence = data.get("command_sequence", self.sequence)
         self.watchdog_ok = bool(data.get("watchdog_ok", data.get("comm_ok", False)))
         self.fault_status = int(data.get("fault_status", self.fault_status))
+        self.autotune = dict(data.get("autotune", self.autotune))
         self.communication_status = "control_active" if self.watchdog_ok else "control_inactive"
         self.connected = True
         self.last_seen = data.get("received_at", time.monotonic())

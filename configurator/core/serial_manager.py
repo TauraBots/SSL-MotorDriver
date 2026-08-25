@@ -1,6 +1,7 @@
 """Qt serial backend; this is the only module that owns serial ports."""
 
 import math
+import os
 import threading
 import time
 
@@ -11,6 +12,12 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .protocol import Protocol
 from .robot_state import RobotState
 from .telemetry import TelemetryHistory
+
+
+def _open_serial(port, baud, **kwargs):
+    if os.name == "posix":
+        kwargs["exclusive"] = True
+    return serial.Serial(port, baud, **kwargs)
 
 
 class SerialManager(QObject):
@@ -26,6 +33,9 @@ class SerialManager(QObject):
     board_configured = Signal(str)
     motion_configured = Signal(float, float)
     configuration_finished = Signal()
+    autotune_started = Signal(str, int)
+    autotune_finished = Signal(str, dict)
+    autotune_aborted = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,10 +57,23 @@ class SerialManager(QObject):
         self._kick_power = 0
         self._kick_pending = False
         self._brake = True
+        self._autotune_motor_id = None
+        self._autotune_robot_id = None
+        self._autotune_start_sequence = None
+        self._autotune_seen_running = False
+        self._autotune_action = Protocol.AUTOTUNE_ACTION_START
 
     @property
     def is_connected(self):
         return self._serial is not None and self._serial.is_open
+
+    @property
+    def autotune_active(self):
+        return self._autotune_motor_id is not None
+
+    @property
+    def autotune_robot_id(self):
+        return self._autotune_robot_id
 
     @staticmethod
     def available_ports():
@@ -64,7 +87,7 @@ class SerialManager(QObject):
         self.disconnect_serial(send_brake=False)
         candidate = None
         try:
-            candidate = serial.Serial(port, baud, timeout=0, write_timeout=0.10)
+            candidate = _open_serial(port, baud, timeout=0, write_timeout=0.10)
             candidate.reset_input_buffer()
             self._serial = candidate
             self.state = RobotState(robot_id=robot_id, connected=True, port=port, baud=baud,
@@ -74,6 +97,8 @@ class SerialManager(QObject):
             self._next_command, self._next_telemetry, self._last_motion = now, now + 0.1, now
             self._last_telemetry = 0.0; self._lost_emitted = False
             self._target = (0.0, 0.0, 0.0); self._brake = True
+            self._autotune_motor_id = None; self._autotune_robot_id = None
+            self._autotune_start_sequence = None; self._autotune_seen_running = False
             self._timer.start()
             self.connected.emit(port, baud, robot_id)
         except Exception as exc:
@@ -100,6 +125,8 @@ class SerialManager(QObject):
         port = self._serial
         if port:
             try:
+                if self.autotune_active:
+                    self.abort_autotune()
                 if send_brake and self.state.robot_id:
                     self._sequence = (self._sequence + 1) & 0xFFFFFFFF
                     port.write(Protocol.encode_velocity(self.state.robot_id, self._sequence,
@@ -111,6 +138,125 @@ class SerialManager(QObject):
         was_connected = self.state.connected
         self._serial = None; self.state.connected = False; self.state.communication_status = "offline"
         if was_connected: self.disconnected.emit()
+
+    def _send_autotune_control(self, action):
+        if not self.is_connected or not self._autotune_robot_id:
+            return None
+        self._sequence = (self._sequence + 1) & 0xFFFFFFFF
+        self._serial.write(Protocol.encode_autotune_control(
+            self._autotune_robot_id, self._sequence,
+            int(self._autotune_motor_id or 0), action))
+        return self._sequence
+
+    def start_autotune(self, motor_id, action=Protocol.AUTOTUNE_ACTION_START):
+        if not self.is_connected:
+            self.error.emit("Radio link is offline")
+            return False
+        if motor_id not in (0, 1, 2, 3, 4):
+            self.error.emit("Motor de Auto-Tune inválido")
+            return False
+        if action not in (Protocol.AUTOTUNE_ACTION_START,
+                          Protocol.AUTOTUNE_ACTION_PREVIEW,
+                          Protocol.AUTOTUNE_ACTION_STAGE):
+            self.error.emit("Modo de Auto-Tune inválido")
+            return False
+        self._target = (0.0, 0.0, 0.0); self._brake = True
+        self.state.vx = self.state.vy = self.state.omega = 0.0
+        self._autotune_robot_id = self.state.robot_id
+        self._autotune_motor_id = int(motor_id)
+        self._autotune_seen_running = False
+        self._autotune_action = int(action)
+        self._next_command = time.monotonic() + 0.05
+        # Clear a terminal result from a previous run before START. Otherwise
+        # the firmware deliberately latches it and treats START as heartbeat.
+        self._send_autotune_control(Protocol.AUTOTUNE_ACTION_ABORT)
+        self._autotune_start_sequence = self._send_autotune_control(
+            self._autotune_action)
+        self.autotune_started.emit(self._autotune_robot_id, int(motor_id))
+        return True
+
+    def restore_pid_configs(self):
+        if not self.is_connected:
+            self.error.emit("Radio link is offline")
+            return False
+        if self.autotune_active:
+            self.error.emit("Aborte o Auto-Tune antes de restaurar os ganhos")
+            return False
+        self._autotune_robot_id = self.state.robot_id
+        self._autotune_motor_id = 0
+        self._send_autotune_control(Protocol.AUTOTUNE_ACTION_ABORT)
+        self._send_autotune_control(Protocol.AUTOTUNE_ACTION_RESTORE)
+        self._autotune_robot_id = None
+        self._autotune_motor_id = None
+        return True
+
+    def commit_staged_pid_configs(self, motor_id):
+        if not self.is_connected:
+            self.error.emit("Radio link is offline")
+            return False
+        if self.autotune_active or motor_id not in (0, 1, 2, 3, 4):
+            self.error.emit("Candidato RAM indisponível para esse motor")
+            return False
+        self._autotune_robot_id = self.state.robot_id
+        self._autotune_motor_id = int(motor_id)
+        self._send_autotune_control(Protocol.AUTOTUNE_ACTION_COMMIT_STAGED)
+        self._autotune_robot_id = None
+        self._autotune_motor_id = None
+        return True
+
+    def abort_autotune(self):
+        if not self.autotune_active:
+            return False
+        robot_id = self._autotune_robot_id
+        self._send_autotune_control(Protocol.AUTOTUNE_ACTION_ABORT)
+        # The first frame stops an active run; the second acknowledges and
+        # clears its terminal status so the next telemetry returns IDLE.
+        self._send_autotune_control(Protocol.AUTOTUNE_ACTION_ABORT)
+        self._autotune_motor_id = None; self._autotune_robot_id = None
+        self._autotune_start_sequence = None; self._autotune_seen_running = False
+        self._target = (0.0, 0.0, 0.0); self._brake = True
+        self.autotune_aborted.emit(robot_id)
+        return True
+
+    def _finish_autotune_from_telemetry(self, data):
+        tune = data.get("autotune")
+        if (not self.autotune_active or not tune or
+                data.get("robot_id") != self._autotune_robot_id):
+            return
+        state = int(tune.get("state", 0))
+        if tune.get("active") or state == 1:
+            self._autotune_seen_running = True
+            return
+        if state not in (2, 3):
+            return
+
+        acknowledges_start = self.autotune_telemetry_is_current(data)
+        if not self._autotune_seen_running and not acknowledges_start:
+            return
+
+        if not tune.get("active"):
+            robot_id = self._autotune_robot_id
+            result = dict(tune)
+            self._send_autotune_control(Protocol.AUTOTUNE_ACTION_ABORT)
+            self._autotune_motor_id = None; self._autotune_robot_id = None
+            self._autotune_start_sequence = None; self._autotune_seen_running = False
+            self.autotune_finished.emit(robot_id, result)
+
+    def autotune_telemetry_is_current(self, data):
+        if not self.autotune_active:
+            return True
+        if data.get("robot_id") != self._autotune_robot_id:
+            return False
+        tune = data.get("autotune")
+        if not tune:
+            return False
+        if tune.get("active") or int(tune.get("state", 0)) == 1:
+            return True
+        reported_sequence = data.get("command_sequence")
+        if reported_sequence is None or self._autotune_start_sequence is None:
+            return False
+        delta = (int(reported_sequence) - self._autotune_start_sequence) & 0xFFFFFFFF
+        return delta < 0x80000000
 
     def set_motion_target(self, vx, vy, omega, brake=False):
         self._target = (float(vx), float(vy), float(omega)); self._brake = bool(brake)
@@ -128,7 +274,9 @@ class SerialManager(QObject):
     def emergency_stop(self):
         self._target = (0.0, 0.0, 0.0); self._brake = True
         self.state.vx = self.state.vy = self.state.omega = 0.0
-        try: self.send_command(0.0, 0.0, 0.0, brake=True)
+        try:
+            self.abort_autotune()
+            self.send_command(0.0, 0.0, 0.0, brake=True)
         except Exception as exc: self.error.emit(str(exc))
 
     def send_telemetry_request(self):
@@ -155,10 +303,13 @@ class SerialManager(QObject):
         try:
             now = time.monotonic()
             if now >= self._next_command:
-                motion = self._limited_motion(now)
-                kick = self._kick_power if self._kick_pending else 0
-                self.send_command(*motion, kick_power=kick,
-                                  brake=self._brake or motion == (0.0, 0.0, 0.0))
+                if self.autotune_active:
+                    self._send_autotune_control(self._autotune_action)
+                else:
+                    motion = self._limited_motion(now)
+                    kick = self._kick_power if self._kick_pending else 0
+                    self.send_command(*motion, kick_power=kick,
+                                      brake=self._brake or motion == (0.0, 0.0, 0.0))
                 self._kick_pending = False; self._next_command = now + 0.05
             if now >= self._next_telemetry:
                 self.send_telemetry_request(); self._next_telemetry = now + 0.2
@@ -170,7 +321,10 @@ class SerialManager(QObject):
                     del self._rx[:-self.MAX_RX_BUFFER_SIZE]
                 self._consume_rx(now)
             if self._last_telemetry and now - self._last_telemetry > 1.0 and not self._lost_emitted:
-                self._lost_emitted = True; self.telemetry_lost.emit()
+                self._lost_emitted = True
+                self.telemetry_lost.emit()
+                if self.autotune_active:
+                    self.abort_autotune()
         except Exception as exc:
             self.disconnect_serial(send_brake=False); self.error.emit(str(exc))
 
@@ -183,6 +337,7 @@ class SerialManager(QObject):
                                    if now - sent < 2.0}
         self._last_telemetry = now; self._lost_emitted = False
         self.state.apply_telemetry(data); self.history.append(data)
+        self._finish_autotune_from_telemetry(data)
         self.telemetry_received.emit(data)
 
     def _configure_async(self, action, port, baud, **values):
@@ -201,7 +356,7 @@ class SerialManager(QObject):
 
     def _configuration_worker(self, action, port, baud, values):
         try:
-            with serial.Serial(port, baud, timeout=0.05, write_timeout=0.10) as config_port:
+            with _open_serial(port, baud, timeout=0.05, write_timeout=0.10) as config_port:
                 time.sleep(0.25); config_port.reset_input_buffer()
                 if action == "discover":
                     replies, received = [], 0

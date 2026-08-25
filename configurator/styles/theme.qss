@@ -43,6 +43,12 @@ QLabel#eyebrow, QLabel#cardTitle { background-color: transparent; color: #8B949E
 QLabel#cardValue { background-color: transparent; color: #FFFFFF; font-size: 20pt; font-weight: 700; }
 QLabel#cardStatus, QLabel#cardDetails, QLabel#motorCommand { background-color: transparent; color: #8B949E; font-size: 9pt; font-weight: 600; }
 QLabel#commandValue { color: #58C8FF; font-size: 18pt; font-weight: 700; }
+QLabel#autotuneState { color: #8B949E; font-size: 15pt; font-weight: 800; min-width: 110px; }
+QLabel#autotuneState[state="running"] { color: #58C8FF; }
+QLabel#autotuneState[state="success"] { color: #3FB950; }
+QLabel#autotuneState[state="warning"] { color: #D29922; }
+QLabel#autotuneState[state="error"] { color: #F85149; }
+QLabel#autotuneMotorValue { color: #E6EDF3; font-family: "Cascadia Mono", "Consolas"; font-size: 10pt; font-weight: 600; }
 QLabel#globalStatus { color: #8B949E; border: 1px solid #30363D; border-radius: 12px; padding: 6px 14px; font-weight: 700; }
 QLabel#globalStatus[online="true"] { color: #3FB950; border-color: #3FB950; background: rgba(63,185,80,0.08); }
 QLabel#controlTarget { color: #00A8FF; border: 1px solid #00A8FF; border-radius: 12px; padding: 6px 14px; font-weight: 700; }
@@ -53,7 +59,9 @@ QPushButton:hover { background: #2D333B; border-color: #00A8FF; }
 QPushButton:pressed { background: #161B22; }
 QPushButton:disabled { color: #6E7681; background: #161B22; border-color: #30363D; }
 QPushButton[accent="true"] { background: #0078B8; border-color: #00A8FF; color: #FFFFFF; }
+QPushButton[accent="true"]:disabled { color: #6E7681; background: #161B22; border-color: #30363D; }
 QPushButton[danger="true"], QPushButton#stopButton { background: #B62324; border: 1px solid #F85149; color: white; }
+QPushButton[danger="true"]:disabled { color: #6E7681; background: #161B22; border-color: #30363D; }
 QPushButton#stopButton { font-size: 15pt; font-weight: 800; min-height: 54px; }
 QPushButton#stopButton:hover { background: #D03533; }
 QPushButton#fleetSelect { max-height: 28px; padding: 4px 10px; }

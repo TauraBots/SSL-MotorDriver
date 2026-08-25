@@ -17,6 +17,14 @@ RX_SOF0 = 0x55
 RX_SOF1 = 0xAA
 ROBOT_VELOCITY_TYPE = 0xD0
 ROBOT_VELOCITY_VERSION = 1
+AUTOTUNE_CONTROL_TYPE = 0xD1
+AUTOTUNE_VERSION = 1
+AUTOTUNE_ACTION_START = 1
+AUTOTUNE_ACTION_ABORT = 2
+AUTOTUNE_ACTION_PREVIEW = 3
+AUTOTUNE_ACTION_STAGE = 4
+AUTOTUNE_ACTION_RESTORE = 5
+AUTOTUNE_ACTION_COMMIT_STAGED = 6
 TELEMETRY_REQUEST_TYPE = 0xE0
 TELEMETRY_RESPONSE_TYPE = 0xE1
 TELEMETRY_VERSION = 1
@@ -24,8 +32,10 @@ TELEMETRY_FLAG_BASIC = 1 << 0
 TELEMETRY_FLAG_MOTORS = 1 << 1
 TELEMETRY_FLAG_BATTERY = 1 << 2
 TELEMETRY_FLAG_DIAGNOSTICS = 1 << 3
-TELEMETRY_FLAGS_FULL = 0x0F
-TELEMETRY_REPLY_WINDOW_S = 0.080
+TELEMETRY_FLAG_AUTOTUNE = 1 << 4
+TELEMETRY_FLAG_AUTOTUNE_DETAIL = 1 << 5
+TELEMETRY_FLAGS_FULL = 0x3F
+TELEMETRY_REPLY_WINDOW_S = 0.100
 TELEMETRY_RESPONSE_BASE_SIZE = 11
 CONFIG_DISCOVER_TYPE = 0xF0
 CONFIG_SET_ID_TYPE = 0xF1
@@ -41,7 +51,19 @@ CSV_HEADER = [
     "mcu_time_ms", "rpm1_x10", "rpm2_x10", "rpm3_x10", "rpm4_x10",
     "battery_mV", "battery_adc", "cmd1", "cmd2", "cmd3", "cmd4",
     "brake", "command_sequence", "communication_ok", "kick_power",
+    "autotune_motor", "autotune_state", "autotune_error", "autotune_active",
+    "autotune_tu_s", "autotune_ku", "autotune_kp", "autotune_ki", "autotune_kd",
+    "autotune_elapsed_ms", "autotune_completed_periods", "autotune_usable_periods",
+    "autotune_stability_flags", "autotune_stable_windows",
+    "autotune_average_high_rpm", "autotune_average_low_rpm",
+    "autotune_period_spread", "autotune_high_peak_spread", "autotune_low_peak_spread",
 ]
+
+
+def open_serial(port, baud, **kwargs):
+    if os.name == "posix":
+        kwargs["exclusive"] = True
+    return serial.Serial(port, baud, **kwargs)
 
 
 def crc16_ccitt_false(data: bytes) -> int:
@@ -105,7 +127,7 @@ def print_board(values):
 
 
 def run_config_action(args):
-    with serial.Serial(args.port, args.baud, timeout=0.05) as ser:
+    with open_serial(args.port, args.baud, timeout=0.05) as ser:
         time.sleep(0.25)
         ser.reset_input_buffer()
         if args.action == "discover":
@@ -179,6 +201,25 @@ def encode_robot_velocity_packet(robot_id: str, sequence: int, vx: float, vy: fl
     return payload + struct.pack("<H", crc16_ccitt_false(payload))
 
 
+def encode_motor_setpoint_packet(robot_id: str, sequence: int, motor_id: int,
+                                 target_rpm: float, brake: int = 0) -> bytes:
+    values = [0, 0, 0, 0]
+    values[motor_id - 1] = max(-32768, min(32767, int(round(target_rpm))))
+    payload = struct.pack("<HBIhhhhBB", 0xAA55, ord(robot_id),
+                          sequence & 0xFFFFFFFF, *values, 0,
+                          1 if brake else 0)
+    return packet_with_crc(payload)
+
+
+def encode_autotune_control_packet(robot_id: str, sequence: int, motor_id: int,
+                                   action: int = AUTOTUNE_ACTION_START) -> bytes:
+    payload = struct.pack(
+        "<HBBBIBB", 0xAA55, AUTOTUNE_CONTROL_TYPE, AUTOTUNE_VERSION,
+        ord(robot_id), sequence & 0xFFFFFFFF, action, motor_id,
+    )
+    return packet_with_crc(payload)
+
+
 def encode_telemetry_request(robot_id: str, request_sequence: int,
                              flags: int = TELEMETRY_FLAGS_FULL) -> bytes:
     payload = struct.pack(
@@ -207,6 +248,8 @@ def parse_telemetry(rx_buffer: bytearray, robot_id: str):
         frame_size += 16 if flags & TELEMETRY_FLAG_MOTORS else 0
         frame_size += 4 if flags & TELEMETRY_FLAG_BATTERY else 0
         frame_size += 13 if flags & TELEMETRY_FLAG_DIAGNOSTICS else 0
+        frame_size += 24 if flags & TELEMETRY_FLAG_AUTOTUNE else 0
+        frame_size += 28 if flags & TELEMETRY_FLAG_AUTOTUNE_DETAIL else 0
         if len(rx_buffer) < frame_size:
             break
         frame = bytes(rx_buffer[:frame_size])
@@ -248,6 +291,32 @@ def parse_telemetry(rx_buffer: bytearray, robot_id: str):
             latest["watchdog_ok"] = frame[offset]
             offset += 1
             latest["command_sequence"] = struct.unpack_from("<I", frame, offset)[0]
+            offset += 4
+        if flags & TELEMETRY_FLAG_AUTOTUNE:
+            motor, state, error, active = struct.unpack_from("<BBBB", frame, offset)
+            offset += 4
+            tu, ku, kp, ki, kd = struct.unpack_from("<fffff", frame, offset)
+            offset += 20
+            latest["autotune"] = {
+                "motor": motor, "state": state, "error": error, "active": active,
+                "tu": tu, "ku": ku, "kp": kp, "ki": ki, "kd": kd,
+            }
+        if flags & TELEMETRY_FLAG_AUTOTUNE_DETAIL:
+            elapsed, completed, usable, stability, stable_windows = struct.unpack_from(
+                "<IBBBB", frame, offset)
+            offset += 8
+            high, low, period_spread, high_spread, low_spread = struct.unpack_from(
+                "<fffff", frame, offset)
+            offset += 20
+            latest["autotune_detail"] = {
+                "elapsed_ms": elapsed, "completed_periods": completed,
+                "usable_periods": usable, "stability_flags": stability,
+                "stable_windows": stable_windows,
+                "average_high_rpm": high, "average_low_rpm": low,
+                "period_spread": period_spread,
+                "high_peak_spread": high_spread,
+                "low_peak_spread": low_spread,
+            }
     return latest
 
 
@@ -255,7 +324,7 @@ def parse_args():
     argv = sys.argv[1:]
     if not argv:
         argv.append("app")
-    elif argv[0] not in ("app", "drive", "discover", "set-id", "set-motion", "-h", "--help"):
+    elif argv[0] not in ("app", "drive", "autotune", "pid-test", "discover", "set-id", "set-motion", "-h", "--help"):
         argv.insert(0, "drive")
 
     parser = argparse.ArgumentParser(description="TauraBots motor-driver application")
@@ -277,6 +346,33 @@ def parse_args():
     drive.add_argument("--accel-tau", type=float, default=0.18, help="Acceleration time constant")
     drive.add_argument("--stop-tau", type=float, default=0.08, help="Stop time constant")
     drive.add_argument("--log", help="Optional telemetry CSV output")
+
+    autotune = actions.add_parser("autotune", help="Run embedded relay PID auto-tune")
+    autotune.add_argument("--port", required=True)
+    autotune.add_argument("--baud", type=int, default=9600)
+    autotune.add_argument("--robot-id", default="A")
+    autotune.add_argument("--motor", default="ALL", help="1, 2, 3, 4, or ALL")
+    autotune.add_argument("--timeout", type=float, default=0.0,
+                          help="Host timeout in seconds; defaults to 35 for one motor or 140 for ALL")
+    autotune.add_argument("--preview", action="store_true",
+                          help="measure candidate gains without applying or saving them")
+    autotune.add_argument("--stage", action="store_true",
+                          help="apply candidate gains in RAM only; a reset or --restore removes them")
+    autotune.add_argument("--restore", action="store_true",
+                          help="restore all runtime PID gains from Flash without tuning")
+    autotune.add_argument("--commit-staged", action="store_true",
+                          help="save the already validated RAM candidate without retuning")
+
+    pid_test = actions.add_parser("pid-test", help="Measure one motor's closed-loop step response")
+    pid_test.add_argument("--port", required=True)
+    pid_test.add_argument("--baud", type=int, default=9600)
+    pid_test.add_argument("--robot-id", default="A")
+    pid_test.add_argument("--motor", type=int, choices=(1, 2, 3, 4), required=True)
+    pid_test.add_argument("--rpm", type=float, default=80.0,
+                          help="positive and negative step magnitude, 20-200 RPM")
+    pid_test.add_argument("--phase-seconds", type=float, default=2.0,
+                          help="duration of each signed step, 1-5 seconds")
+    pid_test.add_argument("--log", help="optional CSV path for raw step samples")
 
     discover = actions.add_parser("discover", help="Discover boards by immutable STM32 UID")
     discover.add_argument("--port", required=True)
@@ -340,12 +436,26 @@ def draw(screen, font, vx: float, vy: float, omega: float, port: str, baud: int,
 
 def telemetry_csv_row(telemetry):
     rpm_x10 = [int(round(value * 10.0)) for value in telemetry["rpm"]]
+    tune = telemetry.get("autotune", {})
     return [
         dt.datetime.now().isoformat(), telemetry["robot_id"], telemetry["request_sequence"],
         telemetry["flags"], telemetry["status"], telemetry["time_ms"], *rpm_x10,
         int(round(telemetry["battery_v"] * 1000.0)), telemetry["battery_adc"],
         *telemetry["cmd"], telemetry["brake"], telemetry["command_sequence"],
         telemetry["comm_ok"], telemetry["kick_power"],
+        tune.get("motor", 0), tune.get("state", 0), tune.get("error", 0),
+        tune.get("active", 0), tune.get("tu", 0.0), tune.get("ku", 0.0),
+        tune.get("kp", 0.0), tune.get("ki", 0.0), tune.get("kd", 0.0),
+        telemetry.get("autotune_detail", {}).get("elapsed_ms", 0),
+        telemetry.get("autotune_detail", {}).get("completed_periods", 0),
+        telemetry.get("autotune_detail", {}).get("usable_periods", 0),
+        telemetry.get("autotune_detail", {}).get("stability_flags", 0),
+        telemetry.get("autotune_detail", {}).get("stable_windows", 0),
+        telemetry.get("autotune_detail", {}).get("average_high_rpm", 0.0),
+        telemetry.get("autotune_detail", {}).get("average_low_rpm", 0.0),
+        telemetry.get("autotune_detail", {}).get("period_spread", 0.0),
+        telemetry.get("autotune_detail", {}).get("high_peak_spread", 0.0),
+        telemetry.get("autotune_detail", {}).get("low_peak_spread", 0.0),
     ]
 
 
@@ -570,7 +680,7 @@ class ConfiguratorApp:
                 raise ValueError("Escolha um ID de robô entre A e Z")
             self.robot_var.set(robot_id)
             port, baud = self.serial_settings()
-            self.ser = serial.Serial(port, baud, timeout=0)
+            self.ser = open_serial(port, baud, timeout=0)
             self.ser.reset_input_buffer()
             self.connected_robot_id = robot_id
             self.rx.clear()
@@ -776,7 +886,7 @@ class ConfiguratorApp:
             args = Args()
             args.action, args.port, args.baud = action, port, baud
             args.uid, args.robot_id = uid, robot_id
-            with serial.Serial(port, baud, timeout=0.05) as ser:
+            with open_serial(port, baud, timeout=0.05) as ser:
                 time.sleep(0.25)
                 ser.reset_input_buffer()
                 if action == "discover":
@@ -916,6 +1026,258 @@ class ConfiguratorApp:
         return 0
 
 
+def run_autotune(args):
+    robot_id = args.robot_id.upper()
+    if len(robot_id) != 1 or not ("A" <= robot_id <= "Z"):
+        raise ValueError("--robot-id must be one letter A-Z")
+    motor_text = str(args.motor).upper()
+    if motor_text == "ALL":
+        motor_id = 0
+    elif motor_text in ("1", "2", "3", "4"):
+        motor_id = int(motor_text)
+    else:
+        raise ValueError("--motor must be 1, 2, 3, 4, or ALL")
+
+    if sum(bool(value) for value in (
+            args.preview, args.stage, args.restore, args.commit_staged)) > 1:
+        raise ValueError("use only one of --preview, --stage, --restore, or --commit-staged")
+
+    state_names = {0: "IDLE", 1: "RUNNING", 2: "FINISHED", 3: "FAILED"}
+    error_names = {
+        0: "NONE", 1: "INVALID_MOTOR", 2: "BATTERY_LOW",
+        3: "ENCODER_NO_MOVEMENT", 4: "TIMEOUT", 5: "COMMUNICATION_LOST",
+        6: "INVALID_OSCILLATION", 7: "OVERSPEED", 8: "FLASH_WRITE",
+        9: "ABORTED",
+    }
+    host_timeout = args.timeout if args.timeout > 0.0 else (140.0 if motor_id == 0 else 35.0)
+    flags = (TELEMETRY_FLAG_BASIC | TELEMETRY_FLAG_MOTORS |
+             TELEMETRY_FLAG_BATTERY | TELEMETRY_FLAG_AUTOTUNE |
+             TELEMETRY_FLAG_AUTOTUNE_DETAIL)
+    sequence = int(time.time() * 1000) & 0xFFFFFFFF
+    request_sequence = 0
+    rx = bytearray()
+    deadline = time.monotonic() + host_timeout
+    next_start = time.monotonic()
+    next_telemetry = time.monotonic()
+    last_summary = None
+
+    if args.commit_staged:
+        start_action = AUTOTUNE_ACTION_COMMIT_STAGED
+        mode = "COMMIT VALIDATED RAM GAINS"
+    elif args.restore:
+        start_action = AUTOTUNE_ACTION_RESTORE
+        mode = "RESTORE FROM FLASH"
+    elif args.stage:
+        start_action = AUTOTUNE_ACTION_STAGE
+        mode = "STAGE IN RAM (not saved)"
+    elif args.preview:
+        start_action = AUTOTUNE_ACTION_PREVIEW
+        mode = "PREVIEW (not applied or saved)"
+    else:
+        start_action = AUTOTUNE_ACTION_START
+        mode = "APPLY AND SAVE"
+    print(f"Starting auto-tune on robot {robot_id}, motor "
+          f"{'ALL' if motor_id == 0 else motor_id} · {mode}")
+    with open_serial(args.port, args.baud, timeout=0.01, write_timeout=0.10) as ser:
+        time.sleep(0.20)
+        ser.reset_input_buffer()
+        sequence = (sequence + 1) & 0xFFFFFFFF
+        ser.write(encode_autotune_control_packet(
+            robot_id, sequence, motor_id, AUTOTUNE_ACTION_ABORT))
+        ser.flush()
+        time.sleep(0.05)
+        if args.restore or args.commit_staged:
+            sequence = (sequence + 1) & 0xFFFFFFFF
+            ser.write(encode_autotune_control_packet(
+                robot_id, sequence, motor_id, start_action))
+            ser.flush()
+            print("Runtime PID gains restored from Flash" if args.restore else
+                  "Commit command sent; confirm the configuration generation with discover")
+            return 0
+        try:
+            while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now >= next_start:
+                    sequence = (sequence + 1) & 0xFFFFFFFF
+                    ser.write(encode_autotune_control_packet(
+                        robot_id, sequence, motor_id, start_action))
+                    ser.flush()
+                    next_start = now + 0.05
+
+                if now >= next_telemetry:
+                    request_sequence = (request_sequence + 1) & 0xFFFF
+                    ser.write(encode_telemetry_request(robot_id, request_sequence, flags))
+                    ser.flush()
+                    next_telemetry = now + 0.20
+                    next_start = max(next_start, now + TELEMETRY_REPLY_WINDOW_S)
+
+                waiting = ser.in_waiting
+                if waiting:
+                    rx.extend(ser.read(waiting))
+                    telemetry = parse_telemetry(rx, robot_id)
+                    if telemetry and "autotune" in telemetry:
+                        tune = telemetry["autotune"]
+                        detail = telemetry.get("autotune_detail", {})
+                        summary = (tune["motor"], tune["state"], tune["error"],
+                                   round(tune["tu"], 4), round(tune["ku"], 3),
+                                   round(tune["kp"], 3), round(tune["ki"], 3),
+                                   detail.get("completed_periods", 0),
+                                   detail.get("usable_periods", 0),
+                                   detail.get("stable_windows", 0),
+                                   round(detail.get("period_spread", 0.0), 3),
+                                   round(max(detail.get("high_peak_spread", 0.0),
+                                             detail.get("low_peak_spread", 0.0)), 3))
+                        if summary != last_summary:
+                            rpm = telemetry.get("rpm", ())
+                            pwm = telemetry.get("cmd", ())
+                            print(
+                                f"motor={tune['motor']} state={state_names.get(tune['state'], tune['state'])} "
+                                f"error={error_names.get(tune['error'], tune['error'])} "
+                                f"Tu={tune['tu']:.4f}s Ku={tune['ku']:.3f} "
+                                f"Kp={tune['kp']:.3f} Ki={tune['ki']:.3f} Kd={tune['kd']:.3f} "
+                                f"elapsed={detail.get('elapsed_ms', 0) / 1000.0:.1f}s "
+                                f"cycles={detail.get('usable_periods', 0)}/8 "
+                                f"confirm={detail.get('stable_windows', 0)}/3 "
+                                f"spread_Tu={100.0 * detail.get('period_spread', 0.0):.1f}% "
+                                f"spread_peak={100.0 * max(detail.get('high_peak_spread', 0.0), detail.get('low_peak_spread', 0.0)):.1f}% "
+                                f"peaks=({detail.get('average_low_rpm', 0.0):.1f},"
+                                f"{detail.get('average_high_rpm', 0.0):.1f}) "
+                                f"rpm={rpm} pwm={pwm}"
+                            )
+                            last_summary = summary
+                        if not tune["active"] and tune["state"] in (2, 3):
+                            return 0 if tune["state"] == 2 else 2
+                time.sleep(0.002)
+        finally:
+            for _ in range(2):
+                sequence = (sequence + 1) & 0xFFFFFFFF
+                ser.write(encode_autotune_control_packet(
+                    robot_id, sequence, motor_id, AUTOTUNE_ACTION_ABORT))
+            ser.flush()
+
+    raise RuntimeError("auto-tune host timeout expired")
+
+
+def _step_metrics(samples, target, phase_start, phase_end):
+    phase = [(when - phase_start, rpm, pwm) for when, commanded, rpm, pwm in samples
+             if phase_start <= when < phase_end and commanded == target]
+    if not phase:
+        return None
+    direction = 1.0 if target > 0.0 else -1.0
+    magnitude = abs(target)
+    tail_start = max(0.0, (phase_end - phase_start) - 0.5)
+    tail = [rpm for when, rpm, _ in phase if when >= tail_start] or [phase[-1][1]]
+    steady = sum(tail) / len(tail)
+    directed = [direction * rpm for _, rpm, _ in phase]
+    peak = max(directed)
+    overshoot = max(0.0, 100.0 * (peak - magnitude) / magnitude)
+    rise = next((when for when, rpm, _ in phase
+                 if direction * rpm >= 0.9 * magnitude), None)
+    band = max(5.0, 0.10 * magnitude)
+    settling = None
+    for index, (when, rpm, _) in enumerate(phase):
+        if all(abs(target - later_rpm) <= band for _, later_rpm, _ in phase[index:]):
+            settling = when
+            break
+    mae = sum(abs(target - rpm) for _, rpm, _ in phase) / len(phase)
+    peak_pwm = max(abs(pwm) for _, _, pwm in phase)
+    return {"samples": len(phase), "steady": steady,
+            "steady_error": abs(target - steady), "overshoot": overshoot,
+            "rise": rise, "settling": settling, "mae": mae,
+            "peak_pwm": peak_pwm}
+
+
+def run_pid_test(args):
+    robot_id = args.robot_id.upper()
+    if len(robot_id) != 1 or not ("A" <= robot_id <= "Z"):
+        raise ValueError("--robot-id must be one letter A-Z")
+    if not math.isfinite(args.rpm) or not 20.0 <= args.rpm <= 200.0:
+        raise ValueError("--rpm must be between 20 and 200")
+    if not math.isfinite(args.phase_seconds) or not 1.0 <= args.phase_seconds <= 5.0:
+        raise ValueError("--phase-seconds must be between 1 and 5")
+
+    rest_s = 0.75
+    phases = ((0.0, rest_s, 0.0),
+              (rest_s, rest_s + args.phase_seconds, args.rpm),
+              (rest_s + args.phase_seconds, 2.0 * rest_s + args.phase_seconds, 0.0),
+              (2.0 * rest_s + args.phase_seconds,
+               2.0 * rest_s + 2.0 * args.phase_seconds, -args.rpm),
+              (2.0 * rest_s + 2.0 * args.phase_seconds,
+               3.0 * rest_s + 2.0 * args.phase_seconds, 0.0))
+    duration = phases[-1][1]
+    sequence = int(time.time() * 1000) & 0xFFFFFFFF
+    request_sequence = 0
+    rx = bytearray()
+    samples = []
+    flags = TELEMETRY_FLAG_BASIC | TELEMETRY_FLAG_MOTORS
+
+    print(f"Closed-loop PID test: robot {robot_id}, motor {args.motor}, "
+          f"steps ±{args.rpm:.0f} RPM")
+    with open_serial(args.port, args.baud, timeout=0.002, write_timeout=0.10) as ser:
+        time.sleep(0.20)
+        ser.reset_input_buffer()
+        start = time.monotonic()
+        next_command = start
+        next_telemetry = start
+        try:
+            while True:
+                now = time.monotonic()
+                elapsed = now - start
+                if elapsed >= duration:
+                    break
+                target = next(value for begin, end, value in phases
+                              if begin <= elapsed < end)
+                if now >= next_command:
+                    sequence = (sequence + 1) & 0xFFFFFFFF
+                    ser.write(encode_motor_setpoint_packet(
+                        robot_id, sequence, args.motor, target, target == 0.0))
+                    next_command = now + 0.02
+                if now >= next_telemetry:
+                    request_sequence = (request_sequence + 1) & 0xFFFF
+                    ser.write(encode_telemetry_request(robot_id, request_sequence, flags))
+                    # Firmware enforces a 100 ms minimum. Leave margin so a
+                    # request is not discarded because of clock/turnaround jitter.
+                    next_telemetry = now + 0.12
+                    next_command = max(next_command, now + 0.045)
+                waiting = ser.in_waiting
+                if waiting:
+                    rx.extend(ser.read(waiting))
+                    telemetry = parse_telemetry(rx, robot_id)
+                    if telemetry and "rpm" in telemetry:
+                        samples.append((elapsed, target,
+                                        telemetry["rpm"][args.motor - 1],
+                                        telemetry["cmd"][args.motor - 1]))
+                time.sleep(0.001)
+        finally:
+            for _ in range(3):
+                sequence = (sequence + 1) & 0xFFFFFFFF
+                ser.write(encode_motor_setpoint_packet(
+                    robot_id, sequence, args.motor, 0.0, 1))
+            ser.flush()
+
+    positive = _step_metrics(samples, args.rpm, phases[1][0], phases[1][1])
+    negative = _step_metrics(samples, -args.rpm, phases[3][0], phases[3][1])
+    if positive is None or negative is None:
+        raise RuntimeError("not enough telemetry samples for PID validation")
+    for label, metrics in (("positive", positive), ("negative", negative)):
+        rise = "n/a" if metrics["rise"] is None else f"{metrics['rise']:.3f}s"
+        settling = "n/a" if metrics["settling"] is None else f"{metrics['settling']:.3f}s"
+        print(f"{label}: n={metrics['samples']} steady={metrics['steady']:+.1f} RPM "
+              f"error={metrics['steady_error']:.1f} overshoot={metrics['overshoot']:.1f}% "
+              f"rise={rise} settling={settling} MAE={metrics['mae']:.1f} "
+              f"peakPWM={metrics['peak_pwm']}")
+    symmetry = abs(abs(positive["steady"]) - abs(negative["steady"]))
+    print(f"steady-state direction mismatch={symmetry:.1f} RPM")
+
+    if args.log:
+        with open(args.log, "w", newline="") as output:
+            writer = csv.writer(output)
+            writer.writerow(("elapsed_s", "target_rpm", "measured_rpm", "pwm"))
+            writer.writerows(samples)
+        print(f"Raw samples written to {args.log}")
+    return 0
+
+
 def main():
     args = parse_args()
     if args.action == "app":
@@ -931,6 +1293,10 @@ def main():
         return QtConfiguratorApp(args, sys.modules[__name__]).run()
     if args.action in ("discover", "set-id", "set-motion"):
         return run_config_action(args)
+    if args.action == "autotune":
+        return run_autotune(args)
+    if args.action == "pid-test":
+        return run_pid_test(args)
 
     global pygame
     import pygame
@@ -957,7 +1323,7 @@ def main():
     font = pygame.font.SysFont("consolas", 18)
     clock = pygame.time.Clock()
 
-    with serial.Serial(args.port, args.baud, timeout=0.02) as ser:
+    with open_serial(args.port, args.baud, timeout=0.02) as ser:
         sequence = 0
         ser.write(encode_robot_velocity_packet(robot_id, sequence, 0.0, 0.0, 0.0, brake=1))
         next_send = time.monotonic()
