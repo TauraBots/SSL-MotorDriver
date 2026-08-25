@@ -50,6 +50,24 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertEqual(fields[5:8], (32767, -32768, 32767))
         self.assertEqual(fields[8], 100)
 
+    def test_motion_configuration_frame_layout(self):
+        uid = bytes.fromhex("0123456789ABCDEF01234567")
+        frame = BACKEND.encode_motion_config_packet(uid, 4.0, 10.0)
+        self.assertEqual(len(frame), 29)
+        fields = struct.unpack("<HB12sffIH", frame)
+        self.assertEqual(fields[:3], (0xAA55, BACKEND.CONFIG_SET_MOTION_TYPE, uid))
+        self.assertAlmostEqual(fields[3], 4.0)
+        self.assertAlmostEqual(fields[4], 10.0)
+        self.assertEqual(fields[5], BACKEND.CONFIG_KEY)
+        self.assertEqual(fields[6], BACKEND.crc16_ccitt_false(frame[:-2]))
+
+    def test_motion_configuration_rejects_invalid_limits(self):
+        uid = bytes(12)
+        with self.assertRaises(ValueError):
+            BACKEND.encode_motion_config_packet(uid, 0.0, 10.0)
+        with self.assertRaises(ValueError):
+            BACKEND.encode_motion_config_packet(uid, 4.0, 100.0)
+
     def test_telemetry_fault_bits_are_exposed(self):
         status = 1 | ((0x01 | 0x04 | 0x10) << 1)
         frame = self.telemetry_frame(BACKEND.TELEMETRY_FLAGS_FULL, status)

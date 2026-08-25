@@ -1,0 +1,38 @@
+#pragma once
+
+#include <stdint.h>
+
+#define SERIAL_RX_SOF0 0x55U
+#define SERIAL_RX_SOF1 0xAAU
+#define SERIAL_ROBOT_ID_BROADCAST ((uint8_t)'*')
+
+#define SERIAL_TYPE_CONFIG_DISCOVER 0xF0U
+#define SERIAL_TYPE_CONFIG_SET_ID 0xF1U
+#define SERIAL_TYPE_CONFIG_DISCOVER_RESPONSE 0xF2U
+#define SERIAL_TYPE_CONFIG_SET_ID_RESPONSE 0xF3U
+#define SERIAL_TYPE_CONFIG_SET_MOTION 0xF4U
+#define SERIAL_TYPE_CONFIG_SET_MOTION_RESPONSE 0xF5U
+#define SERIAL_TYPE_TELEMETRY_REQUEST 0xE0U
+#define SERIAL_TYPE_TELEMETRY_RESPONSE 0xE1U
+#define SERIAL_TYPE_ROBOT_VELOCITY 0xD0U
+
+#define SERIAL_COMMAND_PACKET_LEN 19U
+#define SERIAL_ROBOT_VELOCITY_PACKET_LEN 19U
+#define SERIAL_CONFIG_DISCOVER_PACKET_LEN 9U
+#define SERIAL_CONFIG_SET_ID_PACKET_LEN 22U
+#define SERIAL_CONFIG_RESPONSE_PACKET_LEN 23U
+#define SERIAL_CONFIG_SET_MOTION_PACKET_LEN 29U
+#define SERIAL_TELEMETRY_REQUEST_PACKET_LEN 10U
+#define SERIAL_TELEMETRY_RESPONSE_PACKET_LEN_MAX 51U
+
+#define SERIAL_ROBOT_VELOCITY_PROTOCOL_VERSION 1U
+#define SERIAL_TELEMETRY_PROTOCOL_VERSION 1U
+
+uint16_t SerialProtocol_Crc16(const uint8_t *data, uint16_t len);
+uint16_t SerialProtocol_ReadU16LE(const uint8_t *data);
+uint32_t SerialProtocol_ReadU32LE(const uint8_t *data);
+int16_t SerialProtocol_ReadI16LE(const uint8_t *data);
+void SerialProtocol_WriteU16LE(uint8_t *data, uint16_t value);
+void SerialProtocol_WriteU32LE(uint8_t *data, uint32_t value);
+void SerialProtocol_WriteI16LE(uint8_t *data, int16_t value);
+int16_t SerialProtocol_SaturateI16(float value);

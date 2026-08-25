@@ -12,7 +12,7 @@ from serial.tools import list_ports
 from PySide6.QtCore import QObject, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
     QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -39,8 +39,8 @@ QPushButton:pressed { background: #16243a; }
 QPushButton:disabled { color: #62738a; background: #121d2d; }
 QPushButton[accent="true"] { background: #36d7ef; color: #061018; border: none; }
 QPushButton[accent="true"]:hover { background: #62e5f7; }
-QLineEdit, QComboBox, QSpinBox, QListWidget { background: #182740; border: 1px solid #304766; border-radius: 7px; padding: 7px; selection-background-color: #36d7ef; selection-color: #061018; }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QListWidget:focus { border-color: #36d7ef; }
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget { background: #182740; border: 1px solid #304766; border-radius: 7px; padding: 7px; selection-background-color: #36d7ef; selection-color: #061018; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QListWidget:focus { border-color: #36d7ef; }
 QTabWidget::pane { border: none; top: -1px; }
 QTabBar::tab { background: #111d30; color: #91a6c1; padding: 11px 20px; margin-right: 3px; border-top-left-radius: 7px; border-top-right-radius: 7px; }
 QTabBar::tab:selected { background: #182740; color: #36d7ef; }
@@ -78,6 +78,7 @@ QListWidget::item:selected {
 class WorkerSignals(QObject):
     boards = Signal(object, int)
     configured = Signal(str)
+    motion_configured = Signal(float, float)
     error = Signal(str, str)
     finished = Signal()
     plots_ready = Signal(str)
@@ -106,6 +107,7 @@ class QtConfiguratorApp(QMainWindow):
         self.signals = WorkerSignals()
         self.signals.boards.connect(self.show_boards)
         self.signals.configured.connect(self.configuration_succeeded)
+        self.signals.motion_configured.connect(self.motion_configuration_succeeded)
         self.signals.error.connect(self.show_error)
         self.signals.finished.connect(self.finish_config_action)
         self.signals.plots_ready.connect(self.plots_ready)
@@ -214,7 +216,11 @@ class QtConfiguratorApp(QMainWindow):
         self.board_list = QListWidget(); self.board_list.setMinimumHeight(180); self.board_list.currentRowChanged.connect(self.select_board); content.addWidget(self.board_list)
         row = QHBoxLayout(); row.addWidget(self.label("UID", "muted")); self.uid_edit = QLineEdit(); self.uid_edit.setPlaceholderText("24 caracteres hexadecimais"); row.addWidget(self.uid_edit, 1)
         row.addWidget(self.label("Novo ID", "muted")); self.new_id_box = QComboBox(); self.new_id_box.addItems(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")); row.addWidget(self.new_id_box)
-        self.set_id_button = self.button("SALVAR ID", self.set_id); row.addWidget(self.set_id_button); content.addLayout(row); layout.addWidget(panel); return tab
+        self.set_id_button = self.button("SALVAR ID", self.set_id); row.addWidget(self.set_id_button); content.addLayout(row)
+        content.addSpacing(12); content.addWidget(self.label("LIMITES DE ACELERAÇÃO", "section")); content.addWidget(self.label("Valores persistentes desta placa, aplicados pelo firmware em 1 kHz.", "muted"))
+        motion = QHBoxLayout(); motion.addWidget(self.label("Linear", "muted")); self.linear_accel_spin = QDoubleSpinBox(); self.linear_accel_spin.setRange(.1, 20.); self.linear_accel_spin.setDecimals(2); self.linear_accel_spin.setValue(4.); self.linear_accel_spin.setSuffix(" m/s²"); motion.addWidget(self.linear_accel_spin)
+        motion.addWidget(self.label("Angular", "muted")); self.angular_accel_spin = QDoubleSpinBox(); self.angular_accel_spin.setRange(.1, 50.); self.angular_accel_spin.setDecimals(2); self.angular_accel_spin.setValue(10.); self.angular_accel_spin.setSuffix(" rad/s²"); motion.addWidget(self.angular_accel_spin)
+        self.set_motion_button = self.button("SALVAR ACELERAÇÃO", self.set_motion); motion.addWidget(self.set_motion_button); motion.addStretch(); content.addLayout(motion); layout.addWidget(panel); return tab
 
     def _analysis_tab(self):
         tab = QWidget(); layout = QVBoxLayout(tab); layout.setContentsMargins(0, 16, 0, 0)
@@ -359,17 +365,17 @@ class QtConfiguratorApp(QMainWindow):
 
     def discover(self): self.board_list.clear(); self.board_list.addItem("Procurando placas…"); self.discovery_label.setText("Descoberta em andamento…"); self.begin_config_action("discover")
 
-    def begin_config_action(self, action, uid=None, robot_id=None):
+    def begin_config_action(self, action, uid=None, robot_id=None, linear_accel=None, angular_accel=None):
         if self.config_busy: return
         if self.ser: self.disconnect()
         try:
             port, baud = self.serial_settings()
         except Exception as exc:
             self.show_error("Configuração", str(exc)); return
-        self.config_busy = True; self.discover_button.setEnabled(False); self.discover_button.setText("AGUARDE…"); self.set_id_button.setEnabled(False)
-        QTimer.singleShot(150, lambda: threading.Thread(target=self.config_worker, args=(action, port, baud, uid, robot_id), daemon=True).start())
+        self.config_busy = True; self.discover_button.setEnabled(False); self.discover_button.setText("AGUARDE…"); self.set_id_button.setEnabled(False); self.set_motion_button.setEnabled(False)
+        QTimer.singleShot(150, lambda: threading.Thread(target=self.config_worker, args=(action, port, baud, uid, robot_id, linear_accel, angular_accel), daemon=True).start())
 
-    def config_worker(self, action, port, baud, uid, robot_id):
+    def config_worker(self, action, port, baud, uid, robot_id, linear_accel, angular_accel):
         try:
             with serial.Serial(port, baud, timeout=.05) as ser:
                 time.sleep(.25); ser.reset_input_buffer()
@@ -378,16 +384,22 @@ class QtConfiguratorApp(QMainWindow):
                     for attempt in range(2):
                         payload=struct.pack("<HBI",0xAA55,self.b.CONFIG_DISCOVER_TYPE,(int(time.time()*1000)+attempt)&0xFFFFFFFF); ser.write(self.b.packet_with_crc(payload)); ser.flush(); values.extend(self.b.read_config_responses(ser,1.2)); received += self.b.read_config_responses.last_rx_bytes
                     self.signals.boards.emit(values, received)
-                else:
+                elif action == "set-id":
                     target=self.b.parse_uid(uid); payload=struct.pack("<HB12sBI",0xAA55,self.b.CONFIG_SET_ID_TYPE,target,ord(robot_id),self.b.CONFIG_KEY); ser.write(self.b.packet_with_crc(payload)); ser.flush(); values=self.b.read_config_responses(ser,1.)
                     reply=next((v for v in values if v[1]==self.b.CONFIG_SET_ID_RESPONSE_TYPE and v[2]==target),None)
                     if reply is None: raise RuntimeError("A placa não respondeu ao pedido de configuração")
                     if reply[3]==0: raise RuntimeError("A placa recebeu o pedido, mas não conseguiu gravar o ID na Flash.")
                     self.signals.configured.emit(robot_id)
+                else:
+                    target=self.b.parse_uid(uid); ser.write(self.b.encode_motion_config_packet(target, linear_accel, angular_accel)); ser.flush(); values=self.b.read_config_responses(ser,1.)
+                    reply=next((v for v in values if v[1]==self.b.CONFIG_SET_MOTION_RESPONSE_TYPE and v[2]==target),None)
+                    if reply is None: raise RuntimeError("A placa não respondeu à configuração de movimento")
+                    if reply[3]==0: raise RuntimeError("A placa rejeitou os limites de aceleração.")
+                    self.signals.motion_configured.emit(linear_accel, angular_accel)
         except Exception as exc: self.signals.error.emit("Configuração", str(exc))
         finally: self.signals.finished.emit()
 
-    def finish_config_action(self): self.config_busy=False; self.discover_button.setEnabled(True); self.discover_button.setText("DESCOBRIR PLACAS"); self.set_id_button.setEnabled(True)
+    def finish_config_action(self): self.config_busy=False; self.discover_button.setEnabled(True); self.discover_button.setText("DESCOBRIR PLACAS"); self.set_id_button.setEnabled(True); self.set_motion_button.setEnabled(True)
 
     def show_boards(self, values, received=0):
         self.board_list.clear(); unique={v[2]:v for v in values if v[1]==self.b.CONFIG_DISCOVER_RESPONSE_TYPE}; self.discovered_boards=list(unique.values())
@@ -407,7 +419,13 @@ class QtConfiguratorApp(QMainWindow):
         except ValueError as exc: self.show_error("Configuração", str(exc)); return
         self.begin_config_action("set-id", self.uid_edit.text().strip(), self.new_id_box.currentText())
 
+    def set_motion(self):
+        try: self.b.parse_uid(self.uid_edit.text().strip())
+        except ValueError as exc: self.show_error("Configuração", str(exc)); return
+        self.begin_config_action("set-motion", self.uid_edit.text().strip(), linear_accel=self.linear_accel_spin.value(), angular_accel=self.angular_accel_spin.value())
+
     def configuration_succeeded(self, robot_id): self.robot_box.setCurrentText(robot_id); self.new_id_box.setCurrentText(robot_id); QMessageBox.information(self, "Configuração", f"Robô {robot_id} configurado com sucesso.")
+    def motion_configuration_succeeded(self, linear, angular): QMessageBox.information(self, "Configuração", f"Limites salvos: {linear:.2f} m/s² e {angular:.2f} rad/s².")
     def show_error(self, title, message): QMessageBox.critical(self, title, message)
     def closeEvent(self, event):
         self.disconnect()

@@ -56,6 +56,9 @@ void AppC_SetRobotVelocity(uint32_t sequence,
                            uint8_t kick_power, uint8_t brake_mode);
 void AppC_GetTelemetry(AppC_Telemetry *out);
 void AppC_ForceSafeState(void);
+void AppC_SetMotionLimits(float max_linear_accel,
+                          float max_angular_accel,
+                          float max_brake_accel);
 void AppC_EmergencyStop(void);
 void AppC_RobotToWheels(float vx, float vy, float omega,
                         float wheel_radius_m, float robot_radius_m,

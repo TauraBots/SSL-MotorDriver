@@ -31,6 +31,8 @@ CONFIG_DISCOVER_TYPE = 0xF0
 CONFIG_SET_ID_TYPE = 0xF1
 CONFIG_DISCOVER_RESPONSE_TYPE = 0xF2
 CONFIG_SET_ID_RESPONSE_TYPE = 0xF3
+CONFIG_SET_MOTION_TYPE = 0xF4
+CONFIG_SET_MOTION_RESPONSE_TYPE = 0xF5
 CONFIG_KEY = 0x46434449
 CONFIG_RESPONSE_FMT = "<HB12sBBIH"
 CONFIG_RESPONSE_SIZE = struct.calcsize(CONFIG_RESPONSE_FMT)
@@ -82,7 +84,8 @@ def read_config_responses(ser: serial.Serial, duration_s: float):
             del rx[:CONFIG_RESPONSE_SIZE]
             values = struct.unpack(CONFIG_RESPONSE_FMT, frame)
             if (crc16_ccitt_false(frame[:-2]) == values[-1] and
-                    values[1] in (CONFIG_DISCOVER_RESPONSE_TYPE, CONFIG_SET_ID_RESPONSE_TYPE)):
+                    values[1] in (CONFIG_DISCOVER_RESPONSE_TYPE, CONFIG_SET_ID_RESPONSE_TYPE,
+                                  CONFIG_SET_MOTION_RESPONSE_TYPE)):
                 responses.append(values)
             start = rx.find(b"\x55\xAA")
     read_config_responses.last_rx_bytes = received_bytes
@@ -119,6 +122,19 @@ def run_config_action(args):
                 raise RuntimeError("no boards responded")
             return 0
 
+        if args.action == "set-motion":
+            uid = parse_uid(args.uid)
+            frame = encode_motion_config_packet(uid, args.linear_accel, args.angular_accel)
+            ser.write(frame)
+            ser.flush()
+            for values in read_config_responses(ser, 1.0):
+                if values[1] == CONFIG_SET_MOTION_RESPONSE_TYPE and values[2] == uid:
+                    print_board(values)
+                    if values[3] == 0:
+                        raise RuntimeError("board rejected motion configuration")
+                    return 0
+            raise RuntimeError("target board did not acknowledge motion configuration")
+
         robot_id = args.robot_id.upper()
         if len(robot_id) != 1 or not ("A" <= robot_id <= "Z"):
             raise ValueError("--robot-id must be one letter A-Z")
@@ -133,6 +149,21 @@ def run_config_action(args):
                     raise RuntimeError("board rejected configuration; reset it before setting the ID")
                 return 0
         raise RuntimeError("target board did not acknowledge configuration")
+
+
+def encode_motion_config_packet(uid: bytes, linear_accel: float,
+                                angular_accel: float) -> bytes:
+    if len(uid) != 12:
+        raise ValueError("UID must contain exactly 12 bytes")
+    if not math.isfinite(linear_accel) or not 0.1 <= linear_accel <= 20.0:
+        raise ValueError("linear acceleration must be between 0.1 and 20.0 m/s²")
+    if not math.isfinite(angular_accel) or not 0.1 <= angular_accel <= 50.0:
+        raise ValueError("angular acceleration must be between 0.1 and 50.0 rad/s²")
+    payload = struct.pack(
+        "<HB12sffI", 0xAA55, CONFIG_SET_MOTION_TYPE, uid,
+        linear_accel, angular_accel, CONFIG_KEY,
+    )
+    return packet_with_crc(payload)
 
 
 def encode_robot_velocity_packet(robot_id: str, sequence: int, vx: float, vy: float,
@@ -224,7 +255,7 @@ def parse_args():
     argv = sys.argv[1:]
     if not argv:
         argv.append("app")
-    elif argv[0] not in ("app", "drive", "discover", "set-id", "-h", "--help"):
+    elif argv[0] not in ("app", "drive", "discover", "set-id", "set-motion", "-h", "--help"):
         argv.insert(0, "drive")
 
     parser = argparse.ArgumentParser(description="TauraBots motor-driver application")
@@ -256,6 +287,13 @@ def parse_args():
     set_id.add_argument("--baud", type=int, default=9600)
     set_id.add_argument("--uid", required=True)
     set_id.add_argument("--robot-id", required=True)
+
+    set_motion = actions.add_parser("set-motion", help="Configure persistent acceleration limits")
+    set_motion.add_argument("--port", required=True)
+    set_motion.add_argument("--baud", type=int, default=9600)
+    set_motion.add_argument("--uid", required=True)
+    set_motion.add_argument("--linear-accel", type=float, required=True)
+    set_motion.add_argument("--angular-accel", type=float, required=True)
     return parser.parse_args(argv)
 
 
@@ -891,7 +929,7 @@ def main():
                 ) from exc
             raise
         return QtConfiguratorApp(args, sys.modules[__name__]).run()
-    if args.action in ("discover", "set-id"):
+    if args.action in ("discover", "set-id", "set-motion"):
         return run_config_action(args)
 
     global pygame

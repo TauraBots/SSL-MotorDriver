@@ -15,15 +15,17 @@ bool Near(float a, float b, float tolerance = 1.0e-5f)
 
 int main()
 {
-  AccelerationLimiter limiter;
+  const MotionConfig config = RobotMotionConfig();
+  AccelerationLimiter limiter(config);
 
   const LimitedRobotVelocity step = limiter.Update(2.0f, 0.0f, 0.0f, kDt, false);
-  assert(Near(step.vx, 0.003f));
+  assert(Near(step.vx, config.maxLinearAccel * kDt));
   assert(Near(step.vy, 0.0f));
 
   limiter.Reset();
   const LimitedRobotVelocity diagonal = limiter.Update(2.0f, 2.0f, 0.0f, kDt, false);
-  assert(Near(std::sqrt((diagonal.vx * diagonal.vx) + (diagonal.vy * diagonal.vy)), 0.003f));
+  assert(Near(std::sqrt((diagonal.vx * diagonal.vx) + (diagonal.vy * diagonal.vy)),
+              config.maxLinearAccel * kDt));
   assert(Near(diagonal.vx, diagonal.vy));
 
   limiter.Reset();
@@ -33,11 +35,18 @@ int main()
   }
   const float beforeBrake = limiter.Applied().vx;
   const LimitedRobotVelocity braking = limiter.Update(0.0f, 0.0f, 0.0f, kDt, true);
-  assert(Near(beforeBrake - braking.vx, 0.006f));
+  assert(Near(beforeBrake - braking.vx, config.maxBrakeAccel * kDt));
 
   limiter.Reset();
   const LimitedRobotVelocity angular = limiter.Update(0.0f, 0.0f, 5.0f, kDt, false);
-  assert(Near(angular.omega, 0.008f));
+  assert(Near(angular.omega, config.maxAngularAccel * kDt));
+
+  const MotionConfig gentleConfig = {1.0f, 2.0f, 3.0f, 2.5f, 8.0f};
+  AccelerationLimiter gentleLimiter(gentleConfig);
+  const LimitedRobotVelocity configured =
+      gentleLimiter.Update(2.0f, 0.0f, 5.0f, kDt, false);
+  assert(Near(configured.vx, 0.001f));
+  assert(Near(configured.omega, 0.002f));
 
   limiter.Reset();
   const LimitedRobotVelocity stopped = limiter.Applied();

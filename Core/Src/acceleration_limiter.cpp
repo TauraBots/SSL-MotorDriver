@@ -3,9 +3,15 @@
 #include <algorithm>
 #include <cmath>
 
-AccelerationLimiter::AccelerationLimiter()
-    : vx_(0.0f), vy_(0.0f), omega_(0.0f)
+AccelerationLimiter::AccelerationLimiter(const MotionConfig &config)
+    : config_(config), vx_(0.0f), vy_(0.0f), omega_(0.0f)
 {
+}
+
+void AccelerationLimiter::SetConfig(const MotionConfig &config)
+{
+  config_ = config;
+  Reset();
 }
 
 LimitedRobotVelocity AccelerationLimiter::Update(float desiredVx, float desiredVy,
@@ -20,7 +26,8 @@ LimitedRobotVelocity AccelerationLimiter::Update(float desiredVx, float desiredV
   const float deltaVx = desiredVx - vx_;
   const float deltaVy = desiredVy - vy_;
   const float deltaMagnitude = std::sqrt((deltaVx * deltaVx) + (deltaVy * deltaVy));
-  const float maxLinearDelta = (braking ? MAX_BRAKE_ACCEL : MAX_LINEAR_ACCEL) * dtS;
+  const float maxLinearDelta =
+      (braking ? config_.maxBrakeAccel : config_.maxLinearAccel) * dtS;
   if ((deltaMagnitude > maxLinearDelta) && (deltaMagnitude > 1.0e-9f))
   {
     const float scale = maxLinearDelta / deltaMagnitude;
@@ -33,7 +40,7 @@ LimitedRobotVelocity AccelerationLimiter::Update(float desiredVx, float desiredV
     vy_ = desiredVy;
   }
 
-  const float maxAngularDelta = MAX_ANGULAR_ACCEL * dtS;
+  const float maxAngularDelta = config_.maxAngularAccel * dtS;
   const float deltaOmega = desiredOmega - omega_;
   omega_ += std::max(-maxAngularDelta, std::min(maxAngularDelta, deltaOmega));
   return Applied();

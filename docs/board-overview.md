@@ -115,6 +115,24 @@ Pinos usados pelo firmware:
 
 Pinos livres ou nao usados nesta firmware permanecem sem funcao aplicada no `.ioc`.
 
+## Organizacao do firmware
+
+O codigo de aplicacao esta dividido por responsabilidade:
+
+- `main.c`: inicializacao gerada pelo CubeMX, laco principal e callbacks HAL;
+- `app.cpp` e `app_c_api.cpp`: controle dos motores, seguranca e interface C/C++;
+- `acceleration_limiter.cpp`: limitacao de aceleracao cartesiana;
+- `omni_kinematics.cpp`: conversao entre velocidade do robo e rodas;
+- `serial_protocol.c`: constantes do protocolo, CRC e codificacao little-endian;
+- `serial_service.c`: DMA da UART, parser, comandos, configuracao e telemetria;
+- `robot_identity.c`: UID, validacao do ID e persistencia na Flash;
+- `firmware_runtime.c`: servicos basicos de execucao, atualmente o watchdog.
+
+Novas regras de protocolo devem ficar em `serial_protocol`; o transporte e o
+despacho ficam em `serial_service`; acesso a Flash da identidade deve ficar em
+`robot_identity`. O `main.c` apenas coordena os modulos e os perifericos
+configurados pelo CubeMX.
+
 ## Parametros atuais
 
 - PWM: `30 kHz` (`ARR = 2399`)
@@ -130,6 +148,25 @@ Pinos livres ou nao usados nesta firmware permanecem sem funcao aplicada no `.io
   - quadratura `x4`
   - reducao `18.8:1`
   - ticks por volta da roda: `827.2`
+
+### Configuracao de movimento
+
+Os valores de `Core/Inc/robot_config.h` sao os defaults de fabrica. A aceleracao
+linear e angular pode ser ajustada por placa via serial no SSL Configurator e
+fica persistida junto da identidade na Flash. Se a configuracao persistente for
+invalida, o firmware volta aos defaults compilados.
+
+| Parâmetro | Unidade | Padrão | Função |
+| --- | --- | --- | --- |
+| `ROBOT_MAX_LINEAR_ACCEL` | m/s² | `4.0` | limita a variação vetorial de `(vx, vy)` |
+| `ROBOT_MAX_ANGULAR_ACCEL` | rad/s² | `10.0` | limita separadamente a variação de `omega` |
+| `ROBOT_MAX_BRAKE_ACCEL` | m/s² | `7.0` | permite desaceleração linear maior durante frenagem |
+| `ROBOT_MAX_LINEAR_SPEED` | m/s | `2.5` | limite disponível para validação de comandos de movimento |
+| `ROBOT_MAX_ANGULAR_SPEED` | rad/s | `8.0` | limite disponível para validação de comandos de movimento |
+
+Os dois limites de velocidade fazem parte de `MotionConfig`, mas não aplicam
+uma nova saturação nesta camada; a saturação física das rodas permanece na
+cinemática. O limitador é atualizado a `1 kHz`, antes de `OmniKinematics`.
 
 ## Bateria
 

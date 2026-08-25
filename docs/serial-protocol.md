@@ -68,12 +68,27 @@ Tipos de frame:
 | `0xF1` | host -> placa | UID de 96 bits, novo ID, chave e CRC16 |
 | `0xF2` | placa -> host | UID, estado configurado, ID e geracao |
 | `0xF3` | placa -> host | UID, resultado, ID e geracao |
+| `0xF4` | host -> placa | UID, aceleracao linear/angular, chave e CRC16 |
+| `0xF5` | placa -> host | UID, resultado da gravacao, ID e geracao |
 
 O `SET_ID` e aceito apenas pelo UID exato e pela chave de configuracao. Antes de
 gravar a Flash, o firmware forca `COMM_LOST`, zera os quatro motores, ativa o
 freio e limpa os estados integrais dos PIDs. As respostas de descoberta usam
 atraso curto derivado do UID e do nonce para reduzir colisoes quando varias
 placas compartilham o meio.
+
+Os limites de aceleracao podem ser gravados pela aba `CONFIGURACAO DA PLACA` ou
+pela linha de comando:
+
+```text
+python scripts/ssl-configurator.py set-motion --port COM7 --uid 0123456789ABCDEF01234567 --linear-accel 4.0 --angular-accel 10.0
+```
+
+O frame `0xF4` possui 29 bytes: header e tipo, UID de 12 bytes, dois `float32`
+little-endian (`m/s2` e `rad/s2`), chave de configuracao e CRC16. O firmware
+aceita aceleracao linear entre `0.1` e `20.0 m/s2` e angular entre `0.1` e
+`50.0 rad/s2`. Antes da gravacao os motores entram em estado seguro. Os valores
+sao aplicados imediatamente e novamente carregados a cada inicializacao.
 
 ## Aplicativo do host
 

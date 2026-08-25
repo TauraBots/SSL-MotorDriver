@@ -26,7 +26,7 @@ constexpr float kRobotRadiusM = 0.09f;
 constexpr float kRadSToRpm = 9.5492966f;
 constexpr float kControlDtS = 0.001f;
 constexpr uint32_t kCommunicationTimeoutMs = 150U;
-AccelerationLimiter g_accelerationLimiter;
+AccelerationLimiter g_accelerationLimiter(RobotMotionConfig());
 OmniKinematics g_kinematics(kWheelRadiusM, kRobotRadiusM);
 volatile float g_desiredVx = 0.0f;
 volatile float g_desiredVy = 0.0f;
@@ -273,6 +273,26 @@ extern "C" void AppC_GetTelemetry(AppC_Telemetry *out)
 extern "C" void AppC_ForceSafeState(void)
 {
   EnterSafeState();
+}
+
+extern "C" void AppC_SetMotionLimits(float max_linear_accel,
+                                      float max_angular_accel,
+                                      float max_brake_accel)
+{
+  const MotionConfig defaults = RobotMotionConfig();
+  const MotionConfig config = {
+      max_linear_accel,
+      max_angular_accel,
+      max_brake_accel,
+      defaults.maxLinearSpeed,
+      defaults.maxAngularSpeed};
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_accelerationLimiter.SetConfig(config);
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
 }
 
 extern "C" void AppC_EmergencyStop(void)
