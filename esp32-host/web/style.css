@@ -1,6 +1,5 @@
 * {
   box-sizing: border-box;
-  touch-action: none;
 }
 
 body {
@@ -25,6 +24,7 @@ h1 { margin: 15px 0 5px; }
 
 .controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-around;
   gap: 15px;
@@ -34,9 +34,15 @@ h1 { margin: 15px 0 5px; }
   position: relative;
   width: 150px;
   height: 150px;
+  min-width: 150px;
+  min-height: 150px;
   border: 2px solid #555;
   border-radius: 50%;
   background: #292c33;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: contain;
 }
 
 .knob {
@@ -47,6 +53,7 @@ h1 { margin: 15px 0 5px; }
   height: 55px;
   border-radius: 50%;
   background: #ddd;
+  pointer-events: none;
 }
 
 .label { margin-top: 8px; color: #aaa; font-size: 14px; }

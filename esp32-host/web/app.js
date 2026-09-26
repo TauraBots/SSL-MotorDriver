@@ -43,6 +43,7 @@ const state = {
 
 const controlKeys = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space']);
 const joystickResets = [];
+const activeJoystickPointers = new Map();
 let socket = null;
 
 function debugLog(...args) {
@@ -62,7 +63,9 @@ function setActive(active) {
 }
 
 function canInteract() {
-  return state.connected && state.pageFocused && !document.hidden;
+  // document.hasFocus() is unreliable on mobile browsers. Visibility and the
+  // WebSocket state are the portable gates for touch and pointer interaction.
+  return state.connected && !document.hidden;
 }
 
 function sendMessage(message) {
@@ -230,39 +233,59 @@ function pausePage() {
 }
 
 function setupJoystick(base, knob, callback, rotationOnly) {
-  let dragging = false;
+  let activePointerId = null;
+
   function update(event) {
-    if (!state.active) return;
+    if (!state.active || event.pointerId !== activePointerId) return;
+    event.preventDefault?.();
     const rect = base.getBoundingClientRect();
     let dx = event.clientX - (rect.left + rect.width / 2);
     let dy = event.clientY - (rect.top + rect.height / 2);
     if (rotationOnly) dy = 0;
-    const radius = rect.width / 2 - 30;
+    const radius = Math.max(1, Math.min(rect.width, rect.height) / 2 - 30);
     const length = Math.hypot(dx, dy);
     if (length > radius) {
       dx = dx / length * radius;
       dy = dy / length * radius;
     }
+    console.log('[JOYSTICK MOVE]', dx, dy);
     knob.style.transform = `translate(${dx}px,${dy}px)`;
     callback(dx / radius, -dy / radius);
   }
-  function release() {
-    dragging = false;
+
+  function stop(event) {
+    if (event && event.pointerId !== activePointerId) return;
+    const pointerId = activePointerId;
+    activePointerId = null;
+    if (pointerId !== null) activeJoystickPointers.delete(pointerId);
     knob.style.transform = 'translate(0px,0px)';
     callback(0, 0);
   }
-  joystickResets.push(release);
+
+  joystickResets.push(stop);
   base.addEventListener('pointerdown', event => {
+    if (activePointerId !== null) return;
+    event.preventDefault?.();
+    state.pageFocused = true;
     if (!requestControl()) return;
-    dragging = true;
+    activePointerId = event.pointerId;
+    activeJoystickPointers.set(event.pointerId, stop);
     base.setPointerCapture(event.pointerId);
+    console.log('[JOYSTICK DOWN]', event.clientX, event.clientY);
     update(event);
   });
-  base.addEventListener('pointermove', event => { if (dragging) update(event); });
-  base.addEventListener('lostpointercapture', release);
-  base.addEventListener('pointerup', release);
-  base.addEventListener('pointercancel', release);
+  base.addEventListener('pointermove', update);
+  base.addEventListener('lostpointercapture', stop);
+  base.addEventListener('pointerup', stop);
+  base.addEventListener('pointercancel', stop);
 }
+
+function stopJoystickPointer(event) {
+  activeJoystickPointers.get(event.pointerId)?.(event);
+}
+
+window.addEventListener('pointerup', stopJoystickPointer);
+window.addEventListener('pointercancel', stopJoystickPointer);
 
 UI.linear.addEventListener('input', () => { UI.linearText.innerText = Number(UI.linear.value).toFixed(2); });
 UI.angular.addEventListener('input', () => { UI.angularText.innerText = Number(UI.angular.value).toFixed(2); });

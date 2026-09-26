@@ -12,9 +12,9 @@ const elements = new Map();
 function element(id) {
     if (!elements.has(id)) elements.set(id, {
         value: id === 'linear' ? '0.20' : id === 'angular' ? '1.00' : '50',
-        style: {}, disabled: false, innerText: '', className: '', events: {},
+        style: {}, disabled: false, innerText: '', className: '', events: {}, capturedPointer: null,
         addEventListener(type, cb) { this.events[type] = cb; },
-        setPointerCapture() {},
+        setPointerCapture(pointerId) { this.capturedPointer = pointerId; },
         getBoundingClientRect() { return {left: 0, top: 0, width: 150, height: 150}; },
     });
     return elements.get(id);
@@ -44,7 +44,7 @@ const context = vm.createContext({
     },
     document: {
         hidden: false,
-        hasFocus: () => true,
+        hasFocus: () => false,
         addEventListener(type, cb) { documentEvents[type] = cb; },
         getElementById: element,
     },
@@ -71,6 +71,8 @@ for (const id of ['battery','rpm1','rpm2','rpm3','rpm4','watchdog','sequence','f
 assert.match(html, /href="\/style\.css"/);
 assert.match(html, /src="\/app\.js"/);
 assert.match(style, /\.telemetry/);
+assert.match(style, /\.joystick[\s\S]*touch-action:\s*none/);
+assert.match(style, /\.joystick[\s\S]*user-select:\s*none/);
 
 ws.onopen();
 assert.deepEqual(ws.sent, [], 'opening the page must not take control');
@@ -98,13 +100,22 @@ const beforeInactive = ws.sent.length;
 commandTimer.callback();
 assert.equal(ws.sent.length, beforeInactive);
 
-element('moveJoy').events.pointerdown({pointerId: 1, clientX: 120, clientY: 75});
+let pointerPrevented = false;
+element('moveJoy').events.pointerdown({pointerId: 1, clientX: 120, clientY: 75,
+    preventDefault() { pointerPrevented = true; }});
+assert.equal(pointerPrevented, true);
+assert.equal(element('moveJoy').capturedPointer, 1);
 assert.equal(ws.sent.at(-1), 'TAKE_CONTROL');
 const pointerTakeovers = ws.sent.filter(msg => msg === 'TAKE_CONTROL').length;
-element('moveJoy').events.pointermove({clientX: 115, clientY: 75});
+element('moveJoy').events.pointermove({pointerId: 1, clientX: 115, clientY: 75,
+    preventDefault() {}});
 assert.equal(ws.sent.filter(msg => msg === 'TAKE_CONTROL').length, pointerTakeovers);
 run('sendCommand()');
 assert.match(ws.sent.at(-1), /^CMD,0\.\d{3},0\.000,0\.000,0,0$/);
+assert.ok(consoleMessages.some(entry => entry[0] === 'log' && entry[1] === '[JOYSTICK DOWN]'));
+assert.ok(consoleMessages.some(entry => entry[0] === 'log' && entry[1] === '[JOYSTICK MOVE]'));
+windowEvents.pointerup({pointerId: 1});
+assert.equal(run('state.motion.x'), 0);
 
 active(false);
 element('kickButton').events.click();

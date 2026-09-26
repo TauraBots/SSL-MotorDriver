@@ -12,7 +12,7 @@
 // PERFIL ATUAL
 // ============================================================
 
-#define TAURA_PROFILE TAURA_PROFILE_SAFE_9600
+#define TAURA_PROFILE TAURA_PROFILE_CUSTOM
 
 // ============================================================
 // ROBÔ
@@ -61,8 +61,8 @@
 #define QUADMD_UART_BAUD 921600
 #define QUADMD_COMMAND_HZ 100
 #define QUADMD_SPLIT_TELEMETRY 1
-#define QUADMD_TELEMETRY_FAST_HZ 200
-#define QUADMD_TELEMETRY_FULL_HZ 20
+#define QUADMD_TELEMETRY_FAST_HZ 100
+#define QUADMD_TELEMETRY_FULL_HZ 10
 #define WEB_TELEMETRY_HZ 60
 
 #else

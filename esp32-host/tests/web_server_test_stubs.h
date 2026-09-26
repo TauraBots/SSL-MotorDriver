@@ -29,7 +29,6 @@ typedef int esp_err_t;
 #define HTTP_GET 1
 #define HTTPD_RESP_USE_STRLEN -1
 #define MSG_DONTWAIT 1
-#define SHUT_RDWR 2
 #define HTTPD_WS_TYPE_TEXT 1
 #define HTTPD_WS_TYPE_CLOSE 8
 #define HTTPD_WS_TYPE_PONG 10
@@ -66,10 +65,8 @@ typedef struct {
     void (*close_fn)(httpd_handle_t, int);
 } httpd_config_t;
 #define HTTPD_DEFAULT_CONFIG() ((httpd_config_t){0})
-typedef int (*send_fn_t)(httpd_handle_t, int, const char *, size_t, int);
 static struct {
     httpd_ws_client_info_t info;
-    send_fn_t sender;
     int blocked, fatal, writes, closes;
     size_t limit, used;
     unsigned char wire[8192];
@@ -84,13 +81,9 @@ static int mock_send(int fd, const void *buf, size_t len, int flags) {
     memcpy(peers[fd].wire+peers[fd].used,buf,len); peers[fd].used+=len;
     return (int)len;
 }
-#define send mock_send
-static int mock_shutdown(int fd, int how) { assert(!critical_depth); (void)how; peers[fd].info=HTTPD_WS_CLIENT_INVALID; ++peers[fd].closes; return 0; }
-#define shutdown mock_shutdown
 static int mock_close(int fd) { assert(!critical_depth); peers[fd].info=HTTPD_WS_CLIENT_INVALID; ++peers[fd].closes; return 0; }
 #define close mock_close
 static httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t h, int fd) { (void)h; assert(!critical_depth); return peers[fd].info; }
-static esp_err_t httpd_sess_set_send_override(httpd_handle_t h, int fd, send_fn_t fn) { (void)h; assert(!critical_depth); peers[fd].sender=fn; return ESP_OK; }
 static esp_err_t httpd_ws_send_frame_async(httpd_handle_t h, int fd, httpd_ws_frame_t *frame) {
     assert(!critical_depth && frame->len<=UINT16_MAX);
     unsigned char header[4] = {(unsigned char)(0x80|frame->type), 0, 0, 0};
@@ -101,8 +94,13 @@ static esp_err_t httpd_ws_send_frame_async(httpd_handle_t h, int fd, httpd_ws_fr
         header[1]=126; header[2]=(unsigned char)(frame->len>>8);
         header[3]=(unsigned char)frame->len; header_len=4;
     }
-    if (peers[fd].sender(h,fd,(const char *)header,header_len,0)<0) return ESP_FAIL;
-    if (frame->len && peers[fd].sender(h,fd,(const char *)frame->payload,frame->len,0)<0) return ESP_FAIL;
+    (void)h;
+    int sent=mock_send(fd,header,header_len,MSG_DONTWAIT);
+    if (sent<0) return ESP_FAIL;
+    if (frame->len) {
+        sent=mock_send(fd,frame->payload,frame->len,MSG_DONTWAIT);
+        if (sent<0) return ESP_FAIL;
+    }
     return ESP_OK;
 }
 static esp_err_t httpd_get_client_list(httpd_handle_t h, size_t *count, int *fds) {

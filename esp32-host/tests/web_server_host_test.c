@@ -7,8 +7,6 @@ static void message(int fd, const char *input)
 static void connect_peer(int fd)
 {
     peers[fd].info=HTTPD_WS_CLIENT_WEBSOCKET;
-    httpd_req_t req = {.fd=fd, .method=HTTP_GET};
-    assert(websocket_handler(&req)==ESP_OK);
 }
 static void assert_safe(void)
 {
@@ -29,6 +27,9 @@ int main(void)
     assert(web_server_start()==ESP_OK);
     connect_peer(10); connect_peer(11);
     assert(active_fd==-1); /* Connecting only observes telemetry. */
+    broadcast_work(NULL);
+    assert(wire_contains(10, "{\"type\":\"test\",\"value\":123}"));
+    assert(wire_contains(11, "{\"type\":\"test\",\"value\":123}"));
 
     message(10,"TAKE_CONTROL");
     assert(active_fd==10);
@@ -63,28 +64,22 @@ int main(void)
     message(11,"EMERGENCY_STOP");
     assert(active_fd==-1); assert_safe();
 
-    /* Preserve partial TX bytes and isolate a congested peer. */
+    /* Native HTTPD WebSocket TX emits a complete text frame and isolates errors. */
     message(10,"TAKE_CONTROL");
-    peers[10].used=peers[11].used=0; peers[10].blocked=1;
+    peers[10].used=peers[11].used=0;
     assert(send_text(10,"first"));
-    assert(peers[10].closes==0 && active_fd==10);
-    assert(!send_text(10,"dropped"));
-    assert(send_text(11,"observer")); assert(peers[11].used>0);
-    peers[10].blocked=0; peers[10].limit=1;
-    httpd_ws_frame_t pong={.type=HTTPD_WS_TYPE_PONG,.payload=(uint8_t *)"x",.len=1};
-    assert(httpd_ws_send_frame_async(server,10,&pong)==ESP_OK);
-    for(int i=0;i<20;++i) (void)flush_tx(find_tx(10));
-    const unsigned char expected[]={0x81,5,'f','i','r','s','t',0x8a,1,'x'};
+    const unsigned char expected[]={0x81,5,'f','i','r','s','t'};
     assert(peers[10].used==sizeof(expected));
     assert(memcmp(peers[10].wire,expected,sizeof(expected))==0);
+    peers[10].blocked=1;
+    assert(!send_text(10,"blocked"));
+    assert(send_text(11,"observer")); assert(peers[11].used>0);
+    peers[10].blocked=0;
 
-    /* A dead or closed active socket releases control; descriptor reuse is clean. */
-    peers[10].fatal=ECONNRESET; peers[10].limit=0;
-    (void)send_text(10,"dead");
-    assert(peers[10].closes==1 && active_fd==-1); assert_safe();
-    session_close(server,10); assert(find_tx(10)==NULL);
-    peers[10].fatal=0; connect_peer(10);
-    assert(find_tx(10)->length==0 && active_fd==-1);
+    /* Session cleanup releases control and descriptor reuse is clean. */
+    session_close(server,10);
+    assert(active_fd==-1); assert_safe();
+    connect_peer(10);
     message(10,"TAKE_CONTROL");
     session_close(server,10);
     assert(active_fd==-1); assert_safe();

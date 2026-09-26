@@ -1,10 +1,8 @@
 #include "web_server.h"
 
-#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
@@ -28,22 +26,15 @@ static int active_fd = -1;
 static quadmd_telemetry_t telemetry_snapshot;
 static bool active_dirty = true;
 static bool broadcast_pending;
-/* Immutable after startup; all session operations run on the HTTP task. */
+/* Immutable after startup; all WebSocket sends run on the HTTP task. */
 static httpd_handle_t server;
 
-/* HTTP-task-owned queues include HTTP upgrade and WS control frames so partially
- * sent frames can never interleave. New telemetry is dropped while bytes remain. */
+/* HTTP-task-owned list used only to send one diagnostic frame per session. */
 typedef struct {
     bool active;
-    bool failed;
     int fd;
-    size_t offset;
-    size_t length;
-    unsigned int failures;
-    int64_t last_warning_us;
-    uint8_t bytes[1024];
-} web_tx_t;
-static web_tx_t client_tx[WEB_MAX_CLIENTS];
+} web_test_client_t;
+static web_test_client_t test_clients[WEB_MAX_CLIENTS];
 
 /* Caller holds state_mux. No network operations inside critical sections. */
 static void safe_command_locked(void)
@@ -75,142 +66,61 @@ static void release_active(int fd)
     }
 }
 
-static web_tx_t *find_tx(int fd)
-{
-    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
-        if (client_tx[i].active && client_tx[i].fd == fd) {
-            return &client_tx[i];
-        }
-    }
-    return NULL;
-}
-
 static void session_close(httpd_handle_t handle, int fd)
 {
     (void)handle;
     release_active(fd);
-    web_tx_t *tx = find_tx(fd);
-    if (tx != NULL) {
-        memset(tx, 0, sizeof(*tx));
+    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
+        if (test_clients[i].active && test_clients[i].fd == fd) {
+            test_clients[i].active = false;
+            break;
+        }
     }
     close(fd); /* HTTPD does not close sockets when close_fn is installed. */
 }
 
-static void fail_tx(web_tx_t *tx)
-{
-    if (!tx->failed) {
-        tx->failed = true;
-        release_active(tx->fd);
-        shutdown(tx->fd, SHUT_RDWR); /* HTTPD owns deletion and descriptor reuse. */
-    }
-}
-
-/* One nonblocking write per attempt: no slow peer stalls all other clients.
- * Preserve partial bytes on EAGAIN; discarding them would corrupt the WS stream. */
-static bool flush_tx(web_tx_t *tx)
-{
-    if (tx->failed) {
-        return false;
-    }
-    if (tx->offset == tx->length) {
-        tx->offset = tx->length = 0;
-        return true;
-    }
-    const int written = send(tx->fd, tx->bytes + tx->offset,
-                             tx->length - tx->offset, MSG_DONTWAIT);
-    if (written > 0) {
-        tx->offset += (size_t)written;
-        tx->failures = 0;
-        if (tx->offset == tx->length) {
-            tx->offset = tx->length = 0;
-            return true;
-        }
-        return false;
-    }
-    const int error = written < 0 ? errno : ECONNRESET;
-    const httpd_ws_client_info_t info = httpd_ws_get_fd_info(server, tx->fd);
-    if (info == HTTPD_WS_CLIENT_INVALID || error == ECONNRESET ||
-        error == EPIPE || error == ENOTCONN || error == EBADF) {
-        ESP_LOGW(TAG, "fd=%d socket encerrado, limpando sessao (errno=%d)", tx->fd, error);
-        fail_tx(tx);
-        return false;
-    }
-    /* Congestion/resource pressure is not proof that the client died.
-     * RX errors and TCP keepalive still detect a lost peer. */
-    if (tx->failures < UINT32_MAX) {
-        ++tx->failures;
-    }
-    const int64_t now = esp_timer_get_time();
-    if (tx->last_warning_us == 0 || now - tx->last_warning_us >= 5000000LL) {
-        tx->last_warning_us = now;
-        ESP_LOGW(TAG, "TX pendente fd=%d errno=%d falhas=%u; telemetria nova descartavel",
-                 tx->fd, error, tx->failures);
-    }
-    return false;
-}
-
-/* Used by HTTPD for every outgoing byte on this upgraded session, including
- * PONG/CLOSE. Returning length means the bytes were accepted into our bounded
- * queue, not necessarily transmitted over Wi-Fi yet. */
-static int buffered_send(httpd_handle_t handle, int fd, const char *buf, size_t len, int flags)
-{
-    (void)handle;
-    (void)flags;
-    web_tx_t *tx = find_tx(fd);
-    if (tx == NULL || tx->failed) {
-        return HTTPD_SOCK_ERR_FAIL;
-    }
-    if (tx->offset > 0) {
-        memmove(tx->bytes, tx->bytes + tx->offset, tx->length - tx->offset);
-        tx->length -= tx->offset;
-        tx->offset = 0;
-    }
-    if (len > sizeof(tx->bytes) - tx->length) {
-        /* Only protocol/control flooding can fill this: telemetry checks space
-         * before handing a whole frame to HTTPD. Never truncate a frame. */
-        return HTTPD_SOCK_ERR_FAIL;
-    }
-    memcpy(tx->bytes + tx->length, buf, len);
-    tx->length += len;
-    (void)flush_tx(tx);
-    return tx->failed ? HTTPD_SOCK_ERR_FAIL : (int)len;
-}
-
-static esp_err_t init_tx(int fd)
-{
-    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
-        if (!client_tx[i].active) {
-            client_tx[i] = (web_tx_t){ .active = true, .fd = fd };
-            const esp_err_t err = httpd_sess_set_send_override(server, fd, buffered_send);
-            if (err != ESP_OK) {
-                memset(&client_tx[i], 0, sizeof(client_tx[i]));
-            }
-            return err;
-        }
-    }
-    return ESP_ERR_NO_MEM;
-}
-
 static bool send_text(int fd, const char *text)
 {
-    if (httpd_ws_get_fd_info(server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+    const httpd_ws_client_info_t info = httpd_ws_get_fd_info(server, fd);
+    if (info != HTTPD_WS_CLIENT_WEBSOCKET) {
+        ESP_LOGW(TAG, "WS TX ignorado fd=%d info=%d", fd, (int)info);
         release_active(fd);
         return false;
     }
-    web_tx_t *tx = find_tx(fd);
-    if (tx == NULL || !flush_tx(tx)) {
-        return false; /* Drop this NEW frame, retain any already partially sent. */
-    }
     const size_t len = strlen(text);
-    if (len + 10 > sizeof(tx->bytes)) {
-        return false;
-    }
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)text,
         .len = len,
     };
-    return httpd_ws_send_frame_async(server, fd, &frame) == ESP_OK;
+    ESP_LOGI(TAG, "WS TX fd=%d payload=%s", fd, text);
+    const esp_err_t err = httpd_ws_send_frame_async(server, fd, &frame);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WS TX falhou fd=%d err=0x%x", fd, (unsigned int)err);
+        return false;
+    }
+    return true;
+}
+
+/* Returns true exactly once for each descriptor/session discovered by HTTPD. */
+static bool register_test_client(int fd)
+{
+    web_test_client_t *free_slot = NULL;
+    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
+        if (test_clients[i].active && test_clients[i].fd == fd) {
+            return false;
+        }
+        if (!test_clients[i].active && free_slot == NULL) {
+            free_slot = &test_clients[i];
+        }
+    }
+    if (free_slot == NULL) {
+        ESP_LOGW(TAG, "Sem slot para registrar teste WS fd=%d", fd);
+        return false;
+    }
+    *free_slot = (web_test_client_t){ .active = true, .fd = fd };
+    ESP_LOGI(TAG, "WS conectado fd=%d", fd);
+    return true;
 }
 
 /* HTTP task only. Status is personalized for every connected WebSocket. */
@@ -341,19 +251,8 @@ static void process_websocket_message(int fd, const char *payload)
 static esp_err_t websocket_handler(httpd_req_t *req)
 {
     const int fd = httpd_req_to_sockfd(req);
-    if (req->method == HTTP_GET) {
-        const esp_err_t tx_err = init_tx(fd);
-        if (tx_err != ESP_OK) {
-            return tx_err;
-        }
-        /* HTTPD completes the upgrade after this handler returns. The next queued
-         * broadcast discovers the new session, without retaining its descriptor. */
-        portENTER_CRITICAL(&state_mux);
-        active_dirty = true;
-        portEXIT_CRITICAL(&state_mux);
-        ESP_LOGI(TAG, "WS conectado fd=%d", fd);
-        return ESP_OK;
-    }
+    /* ESP-IDF 6 performs the HTTP upgrade before installing this handler. Every
+     * invocation here is therefore an actual WebSocket frame, not the GET. */
     httpd_ws_frame_t frame = {0};
     esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
     if (err != ESP_OK) {
@@ -426,11 +325,6 @@ void web_server_update_telemetry(const quadmd_telemetry_t *telemetry)
 static void broadcast_work(void *arg)
 {
     (void)arg;
-    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
-        if (client_tx[i].active) {
-            (void)flush_tx(&client_tx[i]);
-        }
-    }
     portENTER_CRITICAL(&state_mux);
     const bool dirty = active_dirty;
     const quadmd_telemetry_t t = telemetry_snapshot;
@@ -463,7 +357,14 @@ static void broadcast_work(void *arg)
         size_t websocket_count = 0;
         for (size_t i = 0; i < count; ++i) {
             if (httpd_ws_get_fd_info(server, clients[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-                websocket_clients[websocket_count++] = clients[i];
+                const int fd = clients[i];
+                websocket_clients[websocket_count++] = fd;
+                if (register_test_client(fd)) {
+                    (void)send_text(fd, "{\"type\":\"test\",\"value\":123}");
+                    portENTER_CRITICAL(&state_mux);
+                    active_dirty = true;
+                    portEXIT_CRITICAL(&state_mux);
+                }
             }
         }
         if (websocket_count > 0) {
