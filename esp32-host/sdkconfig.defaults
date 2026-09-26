@@ -1,0 +1,4 @@
+CONFIG_HTTPD_WS_SUPPORT=y
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+# Eight HTTP clients plus HTTPD internal sockets and network services.
+CONFIG_LWIP_MAX_SOCKETS=16

@@ -1,0 +1,4 @@
+#pragma once
+
+#define TAURA_WIFI_SSID     "NOME_DA_SUA_REDE"
+#define TAURA_WIFI_PASSWORD "SENHA_DA_SUA_REDE"
