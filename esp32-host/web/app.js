@@ -1,0 +1,310 @@
+'use strict';
+
+const DEBUG = true;
+
+const UI = {
+  connection: document.getElementById('connection'),
+  controlState: document.getElementById('controlState'),
+  battery: document.getElementById('battery'),
+  rpm1: document.getElementById('rpm1'),
+  rpm2: document.getElementById('rpm2'),
+  rpm3: document.getElementById('rpm3'),
+  rpm4: document.getElementById('rpm4'),
+  comm: document.getElementById('comm'),
+  watchdog: document.getElementById('watchdog'),
+  sequence: document.getElementById('sequence'),
+  fault: document.getElementById('fault'),
+  rssi: document.getElementById('rssi'),
+  linear: document.getElementById('linear'),
+  linearText: document.getElementById('linearText'),
+  angular: document.getElementById('angular'),
+  angularText: document.getElementById('angularText'),
+  kickPower: document.getElementById('kickPower'),
+  kickText: document.getElementById('kickText'),
+  kickButton: document.getElementById('kickButton'),
+  stopButton: document.getElementById('stopButton'),
+  moveJoy: document.getElementById('moveJoy'),
+  moveKnob: document.getElementById('moveKnob'),
+  rotJoy: document.getElementById('rotJoy'),
+  rotKnob: document.getElementById('rotKnob'),
+};
+
+const state = {
+  connected: false,
+  active: false,
+  telemetry: {},
+  keys: new Set(),
+  pageFocused: document.hasFocus(),
+  closing: false,
+  motion: { joystickX: 0, joystickY: 0, rotation: 0, x: 0, y: 0, omega: 0 },
+  kickPending: 0,
+  emergency: false,
+};
+
+const controlKeys = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space']);
+const joystickResets = [];
+let socket = null;
+
+function debugLog(...args) {
+  if (DEBUG) console.log(...args);
+}
+
+function setConnection(connected) {
+  state.connected = connected;
+  UI.connection.innerText = connected ? 'ONLINE' : 'OFFLINE';
+  UI.connection.className = connected ? 'online' : 'offline';
+}
+
+function setActive(active) {
+  if (state.active && !active) resetControls();
+  state.active = active;
+  UI.controlState.innerText = active ? 'ATIVO' : 'INATIVO';
+}
+
+function canInteract() {
+  return state.connected && state.pageFocused && !document.hidden;
+}
+
+function sendMessage(message) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  debugLog('[TX]', message);
+  socket.send(message);
+  return true;
+}
+
+function connectWebSocket() {
+  socket = new WebSocket(`ws://${location.host}/ws`);
+
+  socket.onopen = () => {
+    debugLog('[WS] conectado');
+    setConnection(true);
+    setActive(false);
+  };
+
+  socket.onclose = () => {
+    debugLog('[WS] desconectado');
+    setConnection(false);
+    setActive(false);
+    if (!state.closing) window.setTimeout(connectWebSocket, 1000);
+  };
+
+  socket.onerror = error => {
+    console.error('[WS] erro', error);
+    socket.close();
+  };
+
+  socket.onmessage = event => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (error) {
+      console.error('[RX] JSON inválido', event.data, error);
+      return;
+    }
+    handleMessage(data);
+  };
+}
+
+function handleMessage(data) {
+  debugLog('[RX]', data);
+  if (!data || typeof data !== 'object') {
+    console.warn('[RX] payload inválido', data);
+    return;
+  }
+  if (data.type === 'telemetry') {
+    handleTelemetry(data);
+    return;
+  }
+  if (data.type === 'active') {
+    handleActive(data);
+    return;
+  }
+  console.warn('[RX] mensagem desconhecida', data);
+}
+
+function handleActive(data) {
+  setActive(data.active === true);
+}
+
+function handleTelemetry(data) {
+  state.telemetry = {...state.telemetry, ...data};
+
+  if (data.battery !== undefined && Number.isFinite(Number(data.battery))) {
+    UI.battery.innerText = `${Number(data.battery).toFixed(3)} V`;
+  } else if (data.battery === undefined) {
+    console.warn('[RX] telemetry sem battery');
+  }
+
+  if (Array.isArray(data.rpm) && data.rpm.length >= 4) {
+    [UI.rpm1.innerText, UI.rpm2.innerText, UI.rpm3.innerText, UI.rpm4.innerText] = data.rpm;
+  } else {
+    console.warn('[RX] telemetry sem rpm[4]');
+  }
+
+  if (data.comm !== undefined) UI.comm.innerText = data.comm ? 'OK' : 'LOST';
+  if (data.watchdog !== undefined) UI.watchdog.innerText = data.watchdog ? 'OK' : 'ERRO';
+  if (data.sequence !== undefined) UI.sequence.innerText = data.sequence;
+  if (data.fault !== undefined && Number.isFinite(Number(data.fault))) {
+    UI.fault.innerText = `0x${Number(data.fault).toString(16).padStart(2, '0').toUpperCase()}`;
+  }
+  if (data.rssi !== undefined) UI.rssi.innerText = `${data.rssi} dBm`;
+}
+
+function updateMotion() {
+  const key = code => state.keys.has(code) ? 1 : 0;
+  const x = state.motion.joystickX + key('KeyD') - key('KeyA');
+  const y = state.motion.joystickY + key('KeyW') - key('KeyS');
+  const scale = Math.max(1, Math.hypot(x, y));
+  state.motion.x = x / scale;
+  state.motion.y = y / scale;
+  state.motion.omega = Math.max(-1, Math.min(1,
+    state.motion.rotation + key('KeyQ') - key('KeyE')));
+  if (state.motion.x || state.motion.y || state.motion.omega) state.emergency = false;
+}
+
+function resetControls() {
+  state.keys.clear();
+  Object.assign(state.motion, {joystickX: 0, joystickY: 0, rotation: 0, x: 0, y: 0, omega: 0});
+  state.kickPending = 0;
+  state.emergency = true;
+  joystickResets.forEach(reset => reset());
+}
+
+function requestControl() {
+  if (!canInteract()) return false;
+  if (!state.active) {
+    if (!sendMessage('TAKE_CONTROL')) return false;
+    setActive(true);
+  }
+  return true;
+}
+
+function releaseControl() {
+  if (state.active) sendMessage('RELEASE_CONTROL');
+  setActive(false);
+}
+
+function sendCommand() {
+  if (!state.active || !canInteract()) return;
+  const vx = state.motion.x * Number(UI.linear.value);
+  const vy = state.motion.y * Number(UI.linear.value);
+  const omega = state.motion.omega * Number(UI.angular.value);
+  const stationary = Math.abs(vx) < 0.001 && Math.abs(vy) < 0.001 && Math.abs(omega) < 0.001;
+  const brake = state.emergency || stationary ? 1 : 0;
+  sendMessage(`CMD,${vx.toFixed(3)},${vy.toFixed(3)},${omega.toFixed(3)},${state.kickPending},${brake}`);
+  state.kickPending = 0;
+}
+
+function sendSafeStop() {
+  if (state.active) sendMessage('CMD,0,0,0,0,1');
+}
+
+function kick() {
+  if (!requestControl()) return;
+  state.kickPending = Number.parseInt(UI.kickPower.value, 10);
+}
+
+function emergencyStop() {
+  if (!canInteract()) return;
+  sendMessage('EMERGENCY_STOP');
+  resetControls();
+  setActive(false);
+}
+
+function pausePage() {
+  state.pageFocused = false;
+  resetControls();
+  sendSafeStop();
+  releaseControl();
+}
+
+function setupJoystick(base, knob, callback, rotationOnly) {
+  let dragging = false;
+  function update(event) {
+    if (!state.active) return;
+    const rect = base.getBoundingClientRect();
+    let dx = event.clientX - (rect.left + rect.width / 2);
+    let dy = event.clientY - (rect.top + rect.height / 2);
+    if (rotationOnly) dy = 0;
+    const radius = rect.width / 2 - 30;
+    const length = Math.hypot(dx, dy);
+    if (length > radius) {
+      dx = dx / length * radius;
+      dy = dy / length * radius;
+    }
+    knob.style.transform = `translate(${dx}px,${dy}px)`;
+    callback(dx / radius, -dy / radius);
+  }
+  function release() {
+    dragging = false;
+    knob.style.transform = 'translate(0px,0px)';
+    callback(0, 0);
+  }
+  joystickResets.push(release);
+  base.addEventListener('pointerdown', event => {
+    if (!requestControl()) return;
+    dragging = true;
+    base.setPointerCapture(event.pointerId);
+    update(event);
+  });
+  base.addEventListener('pointermove', event => { if (dragging) update(event); });
+  base.addEventListener('lostpointercapture', release);
+  base.addEventListener('pointerup', release);
+  base.addEventListener('pointercancel', release);
+}
+
+UI.linear.addEventListener('input', () => { UI.linearText.innerText = Number(UI.linear.value).toFixed(2); });
+UI.angular.addEventListener('input', () => { UI.angularText.innerText = Number(UI.angular.value).toFixed(2); });
+UI.kickPower.addEventListener('input', () => { UI.kickText.innerText = UI.kickPower.value; });
+UI.kickButton.addEventListener('click', kick);
+UI.stopButton.addEventListener('click', emergencyStop);
+
+setupJoystick(UI.moveJoy, UI.moveKnob, (x, y) => {
+  state.motion.joystickX = x;
+  state.motion.joystickY = y;
+  updateMotion();
+}, false);
+setupJoystick(UI.rotJoy, UI.rotKnob, x => {
+  state.motion.rotation = x;
+  updateMotion();
+}, true);
+
+window.addEventListener('keydown', event => {
+  if (!controlKeys.has(event.code) || !canInteract()) return;
+  event.preventDefault();
+  if (event.repeat) return;
+  if (event.code === 'Space') {
+    emergencyStop();
+    state.keys.add('Space');
+    return;
+  }
+  if (state.keys.has('Space') || !requestControl()) return;
+  state.keys.add(event.code);
+  updateMotion();
+});
+
+window.addEventListener('keyup', event => {
+  if (!controlKeys.has(event.code)) return;
+  event.preventDefault();
+  state.keys.delete(event.code);
+  updateMotion();
+});
+
+window.addEventListener('blur', pausePage);
+window.addEventListener('focus', () => { state.pageFocused = true; });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) pausePage();
+  else state.pageFocused = document.hasFocus();
+});
+window.addEventListener('pagehide', () => {
+  state.closing = true;
+  resetControls();
+  sendSafeStop();
+  releaseControl();
+  if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+});
+
+window.setInterval(sendCommand, 50);
+setConnection(false);
+setActive(false);
+connectWebSocket();

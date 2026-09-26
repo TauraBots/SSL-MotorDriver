@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>TauraBots</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <h1>TAURABOTS</h1>
+  <div class="status">WebSocket: <span id="connection" class="offline">OFFLINE</span></div>
+  <div class="status">Controle: <span id="controlState">INATIVO</span></div>
+  <p class="keyboard-help">WASD: movimento | Q/E: rotação | Espaço: STOP</p>
+
+  <section class="panel controls">
+    <div>
+      <div id="moveJoy" class="joystick"><div id="moveKnob" class="knob"></div></div>
+      <div class="label">MOVIMENTO</div>
+    </div>
+    <div>
+      <div id="rotJoy" class="joystick"><div id="rotKnob" class="knob"></div></div>
+      <div class="label">ROTAÇÃO</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <p>Velocidade linear: <span id="linearText">0.20</span> m/s</p>
+    <input id="linear" type="range" min="0.05" max="2.00" step="0.05" value="0.20">
+    <p>Velocidade angular: <span id="angularText">1.00</span> rad/s</p>
+    <input id="angular" type="range" min="0.10" max="10.00" step="0.10" value="1.00">
+    <p>Kicker: <span id="kickText">50</span>%</p>
+    <input id="kickPower" type="range" min="0" max="100" step="1" value="50">
+    <br>
+    <button id="kickButton" class="kick">KICK</button>
+    <button id="stopButton" class="stop">EMERGENCY STOP</button>
+  </section>
+
+  <section class="panel telemetry">
+    <div>Bateria</div><div class="value" id="battery">--</div>
+    <div>RPM M1</div><div class="value" id="rpm1">--</div>
+    <div>RPM M2</div><div class="value" id="rpm2">--</div>
+    <div>RPM M3</div><div class="value" id="rpm3">--</div>
+    <div>RPM M4</div><div class="value" id="rpm4">--</div>
+    <div>Quad-MD</div><div class="value" id="comm">--</div>
+    <div>Watchdog</div><div class="value" id="watchdog">--</div>
+    <div>Sequence</div><div class="value" id="sequence">--</div>
+    <div>Fault</div><div class="value" id="fault">--</div>
+    <div>Wi-Fi RSSI</div><div class="value" id="rssi">--</div>
+  </section>
+</body>
+</html>

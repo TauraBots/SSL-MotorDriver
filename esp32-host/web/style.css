@@ -1,0 +1,79 @@
+* {
+  box-sizing: border-box;
+  touch-action: none;
+}
+
+body {
+  margin: 0;
+  background: #101114;
+  color: #fff;
+  font-family: Arial, sans-serif;
+  text-align: center;
+}
+
+h1 { margin: 15px 0 5px; }
+.status { margin-bottom: 10px; font-size: 14px; }
+.online { color: #5cff7a; }
+.offline { color: #ff5757; }
+
+.panel {
+  margin: 10px;
+  padding: 15px;
+  border-radius: 15px;
+  background: #1b1d22;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 15px;
+}
+
+.joystick {
+  position: relative;
+  width: 150px;
+  height: 150px;
+  border: 2px solid #555;
+  border-radius: 50%;
+  background: #292c33;
+}
+
+.knob {
+  position: absolute;
+  top: 47.5px;
+  left: 47.5px;
+  width: 55px;
+  height: 55px;
+  border-radius: 50%;
+  background: #ddd;
+}
+
+.label { margin-top: 8px; color: #aaa; font-size: 14px; }
+input[type="range"] { width: 85%; }
+
+button {
+  margin: 7px;
+  padding: 15px 25px;
+  border: 0;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: bold;
+}
+
+.kick { background: #e8b020; }
+.stop { background: #d72f2f; color: #fff; }
+
+.telemetry {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  text-align: left;
+}
+
+.value { color: #5cc8ff; font-weight: bold; }
+.keyboard-help { display: none; color: #aaa; font-size: 13px; }
+
+@media (hover: hover) and (pointer: fine) {
+  .keyboard-help { display: block; }
+}

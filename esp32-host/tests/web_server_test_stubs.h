@@ -11,6 +11,13 @@
 #include <limits.h>
 #include <stdarg.h>
 
+static const unsigned char web_index_html[] = "<html>";
+static const unsigned char web_style_css[] = "body{}";
+static const unsigned char web_app_js[] = "'use strict';";
+#define WEB_INDEX_HTML_LEN ((size_t)(sizeof(web_index_html) - 1U))
+#define WEB_STYLE_CSS_LEN ((size_t)(sizeof(web_style_css) - 1U))
+#define WEB_APP_JS_LEN ((size_t)(sizeof(web_app_js) - 1U))
+
 typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_FAIL -1

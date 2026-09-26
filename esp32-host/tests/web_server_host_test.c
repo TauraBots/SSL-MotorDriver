@@ -98,13 +98,14 @@ int main(void)
     };
     web_server_update_telemetry(&telemetry);
     peers[11].used=peers[12].used=0;
+    message(11,"TAKE_CONTROL");
     broadcast_work(NULL);
     assert(peers[11].used>0 && peers[12].used>0);
     assert(wire_contains(11, "\"type\":\"telemetry\""));
     assert(wire_contains(12, "\"type\":\"telemetry\""));
     assert(wire_contains(11, "\"battery\":11.835"));
     assert(wire_contains(12, "\"rssi\":-61"));
-    assert(active_fd==-1); /* Observers receive telemetry without taking control. */
+    assert(active_fd==11); /* The observer receives telemetry without taking control. */
     assert(critical_depth==0);
     puts("PASS: active_fd takeover/release, global stop, watchdog, TX isolation, telemetry, disconnect");
     return 0;

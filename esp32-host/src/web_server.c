@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "app_config.h"
 #include "wifi_sta.h"
+#include "web_assets.h"
 
 #define WEB_MAX_CLIENTS 8
 
@@ -43,716 +44,6 @@ typedef struct {
     uint8_t bytes[1024];
 } web_tx_t;
 static web_tx_t client_tx[WEB_MAX_CLIENTS];
-
-static const char index_html[] =
-"<!DOCTYPE html>"
-"<html>"
-
-"<head><meta charset='utf-8'>"
-
-"<meta name='viewport' "
-"content='width=device-width,"
-"initial-scale=1,"
-"maximum-scale=1,"
-"user-scalable=no'>"
-
-"<title>TauraBots</title>"
-
-"<style>"
-
-"*{"
-"box-sizing:border-box;"
-"touch-action:none;"
-"}"
-
-"body{"
-"margin:0;"
-"background:#101114;"
-"color:#fff;"
-"font-family:Arial,sans-serif;"
-"text-align:center;"
-"}"
-
-"h1{"
-"margin:15px 0 5px;"
-"}"
-
-".status{"
-"font-size:14px;"
-"margin-bottom:10px;"
-"}"
-
-".online{"
-"color:#5cff7a;"
-"}"
-
-".offline{"
-"color:#ff5757;"
-"}"
-
-".panel{"
-"background:#1b1d22;"
-"margin:10px;"
-"padding:15px;"
-"border-radius:15px;"
-"}"
-
-".controls{"
-"display:flex;"
-"justify-content:space-around;"
-"align-items:center;"
-"gap:15px;"
-"}"
-
-".joystick{"
-"position:relative;"
-"width:150px;"
-"height:150px;"
-"border-radius:50%;"
-"background:#292c33;"
-"border:2px solid #555;"
-"}"
-
-".knob{"
-"position:absolute;"
-"width:55px;"
-"height:55px;"
-"border-radius:50%;"
-"background:#ddd;"
-"left:47.5px;"
-"top:47.5px;"
-"}"
-
-".label{"
-"margin-top:8px;"
-"font-size:14px;"
-"color:#aaa;"
-"}"
-
-"input[type=range]{"
-"width:85%;"
-"}"
-
-"button{"
-"padding:15px 25px;"
-"margin:7px;"
-"border:0;"
-"border-radius:10px;"
-"font-weight:bold;"
-"font-size:16px;"
-"}"
-
-".kick{"
-"background:#e8b020;"
-"}"
-
-".stop{"
-"background:#d72f2f;"
-"color:white;"
-"}"
-
-".telemetry{"
-"display:grid;"
-"grid-template-columns:1fr 1fr;"
-"gap:8px;"
-"text-align:left;"
-"}"
-
-".value{"
-"color:#5cc8ff;"
-"font-weight:bold;"
-"}"
-
-"button:disabled,.joystick.disabled{opacity:.4;pointer-events:none;}"
-".keyboard-help{display:none;color:#aaa;font-size:13px;}"
-"@media (hover:hover) and (pointer:fine){.keyboard-help{display:block;}}"
-"</style>"
-
-"</head>"
-
-"<body>"
-
-"<h1>TAURABOTS</h1>"
-
-"<div class='status'>"
-"WebSocket: "
-"<span id='connection' class='offline'>OFFLINE</span>"
-"</div>"
-
-"<div class='status'>Controle: <span id='controlState'>INATIVO</span></div>"
-"<p class='keyboard-help'>WASD: movimento | Q/E: rota&ccedil;&atilde;o | Espa&ccedil;o: STOP</p>"
-"<div class='panel'>"
-
-"<div class='controls'>"
-
-"<div>"
-
-"<div id='moveJoy' class='joystick'>"
-"<div id='moveKnob' class='knob'></div>"
-"</div>"
-
-"<div class='label'>MOVIMENTO</div>"
-
-"</div>"
-
-"<div>"
-
-"<div id='rotJoy' class='joystick'>"
-"<div id='rotKnob' class='knob'></div>"
-"</div>"
-
-"<div class='label'>ROTACAO</div>"
-
-"</div>"
-
-"</div>"
-"</div>"
-
-"<div class='panel'>"
-
-"<p>"
-"Velocidade linear: "
-"<span id='linearText'>0.20</span> m/s"
-"</p>"
-
-"<input "
-"id='linear' "
-"type='range' "
-"min='0.05' "
-"max='2.00' "
-"step='0.05' "
-"value='0.20'>"
-
-"<p>"
-"Velocidade angular: "
-"<span id='angularText'>1.00</span> rad/s"
-"</p>"
-
-"<input "
-"id='angular' "
-"type='range' "
-"min='0.10' "
-"max='10.00' "
-"step='0.10' "
-"value='1.00'>"
-
-"<p>"
-"Kicker: "
-"<span id='kickText'>50</span>%"
-"</p>"
-
-"<input "
-"id='kickPower' "
-"type='range' "
-"min='0' "
-"max='100' "
-"step='1' "
-"value='50'>"
-
-"<br>"
-
-"<button class='kick' onclick='kick()'>"
-"KICK"
-"</button>"
-
-"<button class='stop' onclick='emergencyStop()'>"
-"EMERGENCY STOP"
-"</button>"
-
-"</div>"
-
-"<div class='panel telemetry'>"
-
-"<div>Bateria</div>"
-"<div class='value'>"
-"<span id='battery'>--</span> V"
-"</div>"
-
-"<div>RPM M1</div>"
-"<div class='value' id='rpm1'>--</div>"
-
-"<div>RPM M2</div>"
-"<div class='value' id='rpm2'>--</div>"
-
-"<div>RPM M3</div>"
-"<div class='value' id='rpm3'>--</div>"
-
-"<div>RPM M4</div>"
-"<div class='value' id='rpm4'>--</div>"
-
-"<div>Quad-MD</div>"
-"<div class='value' id='comm'>--</div>"
-
-"<div>Watchdog</div>"
-"<div class='value' id='watchdog'>--</div>"
-
-"<div>Sequence</div><div class='value' id='sequence'>--</div>"
-"<div>Fault</div>"
-"<div class='value' id='fault'>--</div>"
-
-"<div>Wi-Fi RSSI</div>"
-"<div class='value'><span id='rssi'>--</span> dBm</div>"
-
-"</div>"
-
-"<script>"
-
-// ============================================================
-// Estado
-// ============================================================
-
-"let ws=null;"
-"let haveControl=false;"
-"const joystickResets=[];"
-"const pressedKeys=new Set();"
-"const controlKeys=new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','Space']);"
-"let joystickX=0,joystickY=0,joystickRotation=0;"
-"let pageFocused=document.hasFocus();"
-"function canInteract(){"
-"return ws&&ws.readyState===WebSocket.OPEN&&pageFocused&&!document.hidden;"
-"}"
-"function updateMotion(){"
-"const key=code=>pressedKeys.has(code)?1:0;"
-"const x=joystickX+key('KeyD')-key('KeyA');"
-"const y=joystickY+key('KeyW')-key('KeyS');"
-"const scale=Math.max(1,Math.hypot(x,y));"
-"moveX=x/scale;moveY=y/scale;"
-"rotX=Math.max(-1,Math.min(1,joystickRotation+key('KeyQ')-key('KeyE')));"
-"if(moveX!==0||moveY!==0||rotX!==0)emergency=false;"
-"}"
-"function resetControls(){"
-"pressedKeys.clear();joystickX=joystickY=joystickRotation=0;"
-"moveX=moveY=rotX=kickPending=0;emergency=true;"
-"joystickResets.forEach(reset=>reset());"
-"}"
-"function setActive(value){"
-"if(haveControl&&!value)resetControls();"
-"haveControl=value;"
-"document.getElementById('controlState').innerText=value?'ATIVO':'INATIVO';"
-"}"
-"function requestControl(){"
-"if(!canInteract())return false;"
-"if(!haveControl){ws.send('TAKE_CONTROL');setActive(true);}"
-"return true;"
-"}"
-
-"let moveX=0;"
-"let moveY=0;"
-"let rotX=0;"
-
-"let kickPending=0;"
-"let emergency=false;"
-
-// ============================================================
-// Sliders
-// ============================================================
-
-"const linear="
-"document.getElementById('linear');"
-
-"const angular="
-"document.getElementById('angular');"
-
-"const kickPower="
-"document.getElementById('kickPower');"
-
-"linear.oninput=()=>{"
-
-"document.getElementById('linearText').innerText="
-"parseFloat(linear.value).toFixed(2);"
-
-"};"
-
-"angular.oninput=()=>{"
-
-"document.getElementById('angularText').innerText="
-"parseFloat(angular.value).toFixed(2);"
-
-"};"
-
-"kickPower.oninput=()=>{"
-
-"document.getElementById('kickText').innerText="
-"kickPower.value;"
-
-"};"
-
-// ============================================================
-// WebSocket
-// ============================================================
-
-"function connectWS(){"
-
-"ws=new WebSocket("
-"'ws://'+location.host+'/ws'"
-");"
-
-"ws.onopen=()=>{"
-"setActive(false);"
-
-"document.getElementById('connection').innerText="
-"'ONLINE';"
-
-"document.getElementById('connection').className="
-"'online';"
-
-"};"
-
-"ws.onclose=()=>{"
-"setActive(false);"
-
-"document.getElementById('connection').innerText="
-"'OFFLINE';"
-
-"document.getElementById('connection').className="
-"'offline';"
-
-"setTimeout("
-"connectWS,"
-"1000"
-");"
-
-"};"
-
-"ws.onerror=()=>{"
-"setActive(false);"
-"ws.close();"
-"};"
-
-"ws.onmessage=(event)=>{"
-
-"let d;"
-
-"try{"
-"d=JSON.parse(event.data);"
-"}"
-"catch(e){"
-"return;"
-"}"
-
-"if(d.type==='active'){"
-"setActive(d.active===true);"
-"return;}"
-"if(d.type==='telemetry')updateTelemetry(d);"
-"};"
-
-"function updateTelemetry(d){"
-"document.getElementById('sequence').innerText=d.sequence;"
-"if(d.battery!==undefined){"
-
-"document.getElementById('battery').innerText="
-"d.battery.toFixed(3);"
-
-"}"
-
-"if(d.rpm){"
-
-"document.getElementById('rpm1').innerText="
-"d.rpm[0].toFixed(1);"
-
-"document.getElementById('rpm2').innerText="
-"d.rpm[1].toFixed(1);"
-
-"document.getElementById('rpm3').innerText="
-"d.rpm[2].toFixed(1);"
-
-"document.getElementById('rpm4').innerText="
-"d.rpm[3].toFixed(1);"
-
-"}"
-
-"document.getElementById('comm').innerText="
-"d.comm?'OK':'LOST';"
-
-"document.getElementById('watchdog').innerText="
-"d.watchdog?'OK':'FAULT';"
-
-"document.getElementById('fault').innerText="
-"'0x'+"
-"d.fault.toString(16)"
-".padStart(2,'0')"
-".toUpperCase();"
-"if(d.rssi!==undefined)document.getElementById('rssi').innerText=d.rssi;"
-
-"}"
-"}"
-
-"connectWS();"
-
-// ============================================================
-// Joystick
-// ============================================================
-
-"function setupJoystick("
-"baseId,"
-"knobId,"
-"callback,"
-"rotationOnly"
-"){"
-
-"const base="
-"document.getElementById(baseId);"
-
-"const knob="
-"document.getElementById(knobId);"
-
-"let active=false;"
-
-"function update(e){"
-"if(!haveControl)return;"
-
-"const r="
-"base.getBoundingClientRect();"
-
-"const cx="
-"r.left+r.width/2;"
-
-"const cy="
-"r.top+r.height/2;"
-
-"let dx="
-"e.clientX-cx;"
-
-"let dy="
-"e.clientY-cy;"
-
-"if(rotationOnly){"
-"dy=0;"
-"}"
-
-"const radius="
-"r.width/2-30;"
-
-"const len="
-"Math.sqrt("
-"dx*dx+dy*dy"
-");"
-
-"if(len>radius){"
-
-"dx="
-"dx/len*radius;"
-
-"dy="
-"dy/len*radius;"
-
-"}"
-
-"knob.style.transform="
-"`translate(${dx}px,${dy}px)`;"
-
-"callback("
-"dx/radius,"
-"-dy/radius"
-");"
-
-"}"
-
-"base.addEventListener("
-"'pointerdown',"
-"e=>{"
-
-"if(!requestControl())return;"
-"active=true;"
-
-"base.setPointerCapture("
-"e.pointerId"
-");"
-
-"update(e);"
-
-"});"
-
-"base.addEventListener("
-"'pointermove',"
-"e=>{"
-
-"if(active){"
-"update(e);"
-"}"
-
-"});"
-
-"function release(){"
-
-"active=false;"
-
-"knob.style.transform="
-"'translate(0px,0px)';"
-
-"callback(0,0);"
-
-"}"
-
-"joystickResets.push(release);"
-"base.addEventListener('lostpointercapture',release);"
-"base.addEventListener("
-"'pointerup',"
-"release"
-");"
-
-"base.addEventListener("
-"'pointercancel',"
-"release"
-");"
-
-"}"
-
-// ============================================================
-// Configura joysticks
-// ============================================================
-
-"setupJoystick("
-"'moveJoy',"
-"'moveKnob',"
-"(x,y)=>{"
-
-"joystickX=x;"
-"joystickY=y;"
-"updateMotion();"
-
-"},"
-"false"
-");"
-
-"setupJoystick("
-"'rotJoy',"
-"'rotKnob',"
-"(x,y)=>{"
-
-"joystickRotation=x;"
-"updateMotion();"
-
-"},"
-"true"
-");"
-
-// ============================================================
-// Kick
-// ============================================================
-
-"function kick(){"
-"if(!requestControl())return;"
-
-"kickPending="
-"parseInt("
-"kickPower.value"
-");"
-
-"}"
-
-// ============================================================
-// Emergency stop
-// ============================================================
-
-"function emergencyStop(){"
-"if(!canInteract())return;"
-"ws.send('EMERGENCY_STOP');resetControls();setActive(false);"
-"}"
-
-// ============================================================
-// TX comando
-// ============================================================
-
-"function sendCommand(){"
-
-"if("
-"!haveControl || !pageFocused || document.hidden || !ws || "
-"ws.readyState!==1"
-"){"
-
-"return;"
-
-"}"
-
-"const maxLinear="
-"parseFloat(linear.value);"
-
-"const maxAngular="
-"parseFloat(angular.value);"
-
-"const vx="
-"moveX*maxLinear;"
-
-"const vy="
-"moveY*maxLinear;"
-
-"const omega="
-"rotX*maxAngular;"
-
-"const stationary="
-
-"Math.abs(vx)<0.001 && "
-"Math.abs(vy)<0.001 && "
-"Math.abs(omega)<0.001;"
-
-"const brake="
-"(emergency||stationary)"
-"?1:0;"
-
-"const msg="
-"`CMD,"
-"${vx.toFixed(3)},"
-"${vy.toFixed(3)},"
-"${omega.toFixed(3)},"
-"${kickPending},"
-"${brake}`;"
-
-"ws.send(msg);"
-
-"kickPending=0;"
-
-"}"
-
-// Keyboard and touch feed the same motion state; sendCommand remains the only CMD sender.
-"window.addEventListener('keydown',e=>{"
-"if(!controlKeys.has(e.code)||!canInteract())return;"
-"e.preventDefault();"
-"if(e.repeat)return;"
-"if(e.code==='Space'){emergencyStop();pressedKeys.add('Space');return;}"
-"if(pressedKeys.has('Space'))return;"
-"if(!requestControl())return;"
-"pressedKeys.add(e.code);updateMotion();"
-"});"
-"window.addEventListener('keyup',e=>{"
-"if(!controlKeys.has(e.code))return;"
-"e.preventDefault();pressedKeys.delete(e.code);updateMotion();"
-"});"
-"function sendSafeStop(){"
-"if(ws&&ws.readyState===WebSocket.OPEN&&haveControl)"
-"ws.send('CMD,0,0,0,0,1');"
-"}"
-"function releaseControl(){"
-"if(ws&&ws.readyState===WebSocket.OPEN&&haveControl)ws.send('RELEASE_CONTROL');"
-"setActive(false);"
-"}"
-"function pausePage(){"
-"pageFocused=false;resetControls();sendSafeStop();releaseControl();"
-"}"
-"window.addEventListener('blur',pausePage);"
-"window.addEventListener('focus',()=>{pageFocused=true;});"
-"document.addEventListener('visibilitychange',()=>{"
-"if(document.hidden){pausePage();}"
-"else{pageFocused=document.hasFocus();}"
-"});"
-
-"window.addEventListener('pagehide',()=>{"
-"resetControls();sendSafeStop();releaseControl();"
-"if(ws&&ws.readyState===WebSocket.OPEN)ws.close();"
-"});"
-
-// Browser -> ESP32 @20 Hz
-"setInterval("
-"sendCommand,"
-"50"
-");"
-
-"setActive(false);"
-"</script>"
-
-"</body>"
-"</html>";
-
 
 /* Caller holds state_mux. No network operations inside critical sections. */
 static void safe_command_locked(void)
@@ -953,12 +244,36 @@ static void broadcast_active(void)
     }
 }
 
-static esp_err_t root_handler(httpd_req_t *req)
+static esp_err_t send_web_asset(httpd_req_t *req, const char *content_type,
+                                const unsigned char *data, size_t length)
 {
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_type(req, content_type);
+    /* The UI and WebSocket schema ship in the same firmware image. Never let a
+     * cached page run against a newer protocol after an OTA/serial update. */
+    httpd_resp_set_hdr(req, "Cache-Control",
+                       "no-store, no-cache, must-revalidate, max-age=0");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
     /* Leave the limited client slots available for persistent WebSockets. */
     httpd_resp_set_hdr(req, "Connection", "close");
-    return httpd_resp_send(req, index_html, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, (const char *)data, (ssize_t)length);
+}
+
+static esp_err_t root_handler(httpd_req_t *req)
+{
+    return send_web_asset(req, "text/html; charset=utf-8",
+                          web_index_html, WEB_INDEX_HTML_LEN);
+}
+
+static esp_err_t style_handler(httpd_req_t *req)
+{
+    return send_web_asset(req, "text/css; charset=utf-8",
+                          web_style_css, WEB_STYLE_CSS_LEN);
+}
+
+static esp_err_t app_handler(httpd_req_t *req)
+{
+    return send_web_asset(req, "application/javascript; charset=utf-8",
+                          web_app_js, WEB_APP_JS_LEN);
 }
 
 static void process_command(int fd, const char *payload)
@@ -989,6 +304,38 @@ static void process_command(int fd, const char *payload)
         last_command_us = now;
     }
     portEXIT_CRITICAL(&state_mux);
+}
+
+/* Transport-independent parser for the public WebSocket command API. */
+static void process_websocket_message(int fd, const char *payload)
+{
+    if (strcmp(payload, "TAKE_CONTROL") == 0) {
+        portENTER_CRITICAL(&state_mux);
+        const int previous_fd = active_fd;
+        if (previous_fd != fd) {
+            safe_command_locked();
+            active_fd = fd;
+            active_dirty = true;
+        }
+        portEXIT_CRITICAL(&state_mux);
+        if (previous_fd < 0) {
+            ESP_LOGI(TAG, "fd=%d assumiu controle", fd);
+        } else if (previous_fd != fd) {
+            ESP_LOGI(TAG, "controle transferido fd=%d -> fd=%d", previous_fd, fd);
+        }
+        broadcast_active();
+    } else if (strcmp(payload, "RELEASE_CONTROL") == 0) {
+        release_active(fd);
+        broadcast_active();
+    } else if (strcmp(payload, "EMERGENCY_STOP") == 0) {
+        portENTER_CRITICAL(&state_mux);
+        clear_active_locked();
+        portEXIT_CRITICAL(&state_mux);
+        ESP_LOGW(TAG, "parada de emergencia fd=%d", fd);
+        broadcast_active();
+    } else {
+        process_command(fd, payload);
+    }
 }
 
 static esp_err_t websocket_handler(httpd_req_t *req)
@@ -1037,33 +384,7 @@ static esp_err_t websocket_handler(httpd_req_t *req)
         return ESP_OK;
     }
     payload[frame.len] = '\0';
-    if (strcmp(payload, "TAKE_CONTROL") == 0) {
-        portENTER_CRITICAL(&state_mux);
-        const int previous_fd = active_fd;
-        if (previous_fd != fd) {
-            safe_command_locked();
-            active_fd = fd;
-            active_dirty = true;
-        }
-        portEXIT_CRITICAL(&state_mux);
-        if (previous_fd < 0) {
-            ESP_LOGI(TAG, "fd=%d assumiu controle", fd);
-        } else if (previous_fd != fd) {
-            ESP_LOGI(TAG, "controle transferido fd=%d -> fd=%d", previous_fd, fd);
-        }
-        broadcast_active();
-    } else if (strcmp(payload, "RELEASE_CONTROL") == 0) {
-        release_active(fd);
-        broadcast_active();
-    } else if (strcmp(payload, "EMERGENCY_STOP") == 0) {
-        portENTER_CRITICAL(&state_mux);
-        clear_active_locked();
-        portEXIT_CRITICAL(&state_mux);
-        ESP_LOGW(TAG, "parada de emergencia fd=%d", fd);
-        broadcast_active();
-    } else {
-        process_command(fd, payload);
-    }
+    process_websocket_message(fd, payload);
     return ESP_OK;
 }
 
@@ -1133,6 +454,9 @@ static void broadcast_work(void *arg)
         wifi.connected ? "true" : "false", wifi.rssi);
     int clients[WEB_MAX_CLIENTS];
     size_t count = WEB_MAX_CLIENTS;
+    if (len > 0 && len < (int)sizeof(json)) {
+        ESP_LOGI(TAG, "Telemetry JSON: %s", json);
+    }
     if (len > 0 && len < (int)sizeof(json) &&
         httpd_get_client_list(server, &count, clients) == ESP_OK) {
         int websocket_clients[WEB_MAX_CLIENTS];
@@ -1143,8 +467,8 @@ static void broadcast_work(void *arg)
             }
         }
         if (websocket_count > 0) {
-            ESP_LOGI(TAG, "Broadcasting telemetry to %u clients",
-                     (unsigned int)websocket_count);
+            ESP_LOGI(TAG, "Broadcast telemetry to %d clients",
+                     (int)websocket_count);
             for (size_t i = 0; i < websocket_count; ++i) {
                 (void)send_text(websocket_clients[i], json);
             }
@@ -1207,7 +531,19 @@ esp_err_t web_server_start(void)
         .uri = "/ws", .method = HTTP_GET, .handler = websocket_handler,
         .is_websocket = true,
     };
+    const httpd_uri_t style_uri = {
+        .uri = "/style.css", .method = HTTP_GET, .handler = style_handler,
+    };
+    const httpd_uri_t app_uri = {
+        .uri = "/app.js", .method = HTTP_GET, .handler = app_handler,
+    };
     err = httpd_register_uri_handler(server, &root_uri);
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(server, &style_uri);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(server, &app_uri);
+    }
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(server, &websocket_uri);
     }
