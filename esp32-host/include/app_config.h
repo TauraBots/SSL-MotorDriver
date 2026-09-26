@@ -80,9 +80,19 @@
 // Controller ownership is independent of the motion watchdog.
 #define CONTROLLER_LEASE_TIMEOUT_MS 1500
 #define CONTROLLER_HEARTBEAT_MS 100
+#define CONTROLLER_LEASE_CHECK_PERIOD_US 50000
 
 // Allow Wi-Fi retransmissions without relaxing the movement watchdog above.
 #define WEB_SOCKET_SEND_TIMEOUT_MS 250
+
+// TX POWER is the ESP32 transmit level; RSSI is the AP signal received by it.
+#define WIFI_TX_POWER_DBM 20
+#define WIFI_TX_POWER_QUARTER_DBM (WIFI_TX_POWER_DBM * 4)
+#define WIFI_MONITOR_PERIOD_MS 1000
+
+#if WIFI_TX_POWER_QUARTER_DBM < 8 || WIFI_TX_POWER_QUARTER_DBM > 84
+#error "WIFI_TX_POWER_DBM fora do intervalo aceito pela API ESP-IDF"
+#endif
 
 // ============================================================
 // UTIL

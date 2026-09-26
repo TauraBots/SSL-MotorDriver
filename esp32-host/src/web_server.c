@@ -1,5 +1,6 @@
 #include "web_server.h"
 
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,20 @@ static bool control_dirty = true;
 static bool broadcast_pending;
 /* Immutable after startup; all session operations run on the HTTP task. */
 static httpd_handle_t server;
+
+/* HTTP-task-owned queues include HTTP upgrade and WS control frames so partially
+ * sent frames can never interleave. New telemetry is dropped while bytes remain. */
+typedef struct {
+    bool active;
+    bool failed;
+    int fd;
+    size_t offset;
+    size_t length;
+    unsigned int failures;
+    int64_t last_warning_us;
+    uint8_t bytes[1024];
+} web_tx_t;
+static web_tx_t client_tx[WEB_MAX_CLIENTS];
 
 static const char index_html[] =
 "<!DOCTYPE html>"
@@ -290,6 +305,25 @@ static const char index_html[] =
 
 "let ws=null;"
 "let isController=false;"
+"let occupied=null,claimPending=false,autoClaim=true;"
+"let claimTimer=null,claimCooldown=null;"
+"function cancelClaimTimers(){"
+"clearTimeout(claimTimer);clearTimeout(claimCooldown);"
+"claimTimer=claimCooldown=null;claimPending=false;"
+"}"
+"function scheduleClaim(){"
+"if(!autoClaim||occupied===true||isController||claimPending||claimTimer!==null)return;"
+"const socket=ws;"
+"claimTimer=setTimeout(()=>{claimTimer=null;if(ws===socket)claimControl();},100);"
+"}"
+"function claimControl(){"
+"if(!ws||ws.readyState!==WebSocket.OPEN||isController||claimPending)return;"
+"claimPending=true;ws.send('CLAIM_CONTROL');"
+"claimCooldown=setTimeout(()=>{"
+"claimCooldown=null;claimPending=false;"
+"if(occupied===false)scheduleClaim();"
+"},300);"
+"}"
 "const joystickResets=[];"
 "const pressedKeys=new Set();"
 "const controlKeys=new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','Space']);"
@@ -313,6 +347,7 @@ static const char index_html[] =
 "function setControl(value){"
 "if(isController!==value||!value){resetControls();}"
 "isController=value;"
+"if(value)cancelClaimTimers();"
 "document.getElementById('role').innerText=value?'CONTROLADOR':'ESPECTADOR';"
 "document.getElementById('controlButton').innerText=value?'LIBERAR CONTROLE':'ASSUMIR CONTROLE';"
 "document.querySelectorAll('input,.kick,.stop').forEach(el=>el.disabled=!value);"
@@ -320,8 +355,9 @@ static const char index_html[] =
 "}"
 "function toggleControl(){"
 "if(!ws||ws.readyState!==1)return;"
-"ws.send(isController?'RELEASE_CONTROL':'CLAIM_CONTROL');"
-"if(isController)setControl(false);"
+"if(isController){"
+"autoClaim=false;cancelClaimTimers();ws.send('RELEASE_CONTROL');setControl(false);"
+"}else{autoClaim=true;claimControl();}"
 "}"
 "window.addEventListener('pagehide',()=>{"
 "if(ws&&ws.readyState===1){if(isController)ws.send('RELEASE_CONTROL');ws.close();}"
@@ -381,7 +417,7 @@ static const char index_html[] =
 
 "ws.onopen=()=>{"
 "setControl(false);document.getElementById('controlButton').disabled=false;"
-"ws.send('CLAIM_CONTROL');"
+"cancelClaimTimers();occupied=null;autoClaim=true;scheduleClaim();"
 
 "document.getElementById('connection').innerText="
 "'ONLINE';"
@@ -392,6 +428,7 @@ static const char index_html[] =
 "};"
 
 "ws.onclose=()=>{"
+"cancelClaimTimers();occupied=null;"
 "setControl(false);document.getElementById('controlButton').disabled=true;"
 
 "document.getElementById('connection').innerText="
@@ -423,7 +460,11 @@ static const char index_html[] =
 "return;"
 "}"
 
-"if(d.type==='control'){setControl(d.controller===true);return;}"
+"if(d.type==='control'){"
+"occupied=d.occupied;setControl(d.controller===true);"
+"if(occupied===true){clearTimeout(claimTimer);claimTimer=null;}"
+"else if(occupied===false){scheduleClaim();}"
+"return;}"
 "document.getElementById('sequence').innerText=d.sequence;"
 "if(d.battery!==undefined){"
 
@@ -808,29 +849,142 @@ static bool controller_is_valid(void)
     return valid;
 }
 
+static web_tx_t *find_tx(int fd)
+{
+    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
+        if (client_tx[i].active && client_tx[i].fd == fd) {
+            return &client_tx[i];
+        }
+    }
+    return NULL;
+}
+
 static void session_close(httpd_handle_t handle, int fd)
 {
     (void)handle;
-    /* Reset before the descriptor can be reused by another browser. */
     release_controller(fd);
-    close(fd); /* A custom close_fn must close the socket itself. */
+    web_tx_t *tx = find_tx(fd);
+    if (tx != NULL) {
+        memset(tx, 0, sizeof(*tx));
+    }
+    close(fd); /* HTTPD does not close sockets when close_fn is installed. */
+}
+
+static void fail_tx(web_tx_t *tx)
+{
+    if (!tx->failed) {
+        tx->failed = true;
+        release_controller(tx->fd);
+        shutdown(tx->fd, SHUT_RDWR); /* HTTPD owns deletion and descriptor reuse. */
+    }
+}
+
+/* One nonblocking write per attempt: no slow peer stalls all other clients.
+ * Preserve partial bytes on EAGAIN; discarding them would corrupt the WS stream. */
+static bool flush_tx(web_tx_t *tx)
+{
+    if (tx->failed) {
+        return false;
+    }
+    if (tx->offset == tx->length) {
+        tx->offset = tx->length = 0;
+        return true;
+    }
+    const int written = send(tx->fd, tx->bytes + tx->offset,
+                             tx->length - tx->offset, MSG_DONTWAIT);
+    if (written > 0) {
+        tx->offset += (size_t)written;
+        tx->failures = 0;
+        if (tx->offset == tx->length) {
+            tx->offset = tx->length = 0;
+            return true;
+        }
+        return false;
+    }
+    const int error = written < 0 ? errno : ECONNRESET;
+    const httpd_ws_client_info_t info = httpd_ws_get_fd_info(server, tx->fd);
+    if (info == HTTPD_WS_CLIENT_INVALID || error == ECONNRESET ||
+        error == EPIPE || error == ENOTCONN || error == EBADF) {
+        ESP_LOGW(TAG, "fd=%d socket encerrado, limpando sessao (errno=%d)", tx->fd, error);
+        fail_tx(tx);
+        return false;
+    }
+    /* Congestion/resource pressure is not proof that the controller died.
+     * Lease, RX errors and TCP keepalive still detect a lost peer. */
+    if (tx->failures < UINT32_MAX) {
+        ++tx->failures;
+    }
+    const int64_t now = esp_timer_get_time();
+    if (tx->last_warning_us == 0 || now - tx->last_warning_us >= 5000000LL) {
+        tx->last_warning_us = now;
+        ESP_LOGW(TAG, "TX pendente fd=%d errno=%d falhas=%u; telemetria nova descartavel",
+                 tx->fd, error, tx->failures);
+    }
+    return false;
+}
+
+/* Used by HTTPD for every outgoing byte on this upgraded session, including
+ * PONG/CLOSE. Returning length means the bytes were accepted into our bounded
+ * queue, not necessarily transmitted over Wi-Fi yet. */
+static int buffered_send(httpd_handle_t handle, int fd, const char *buf, size_t len, int flags)
+{
+    (void)handle;
+    (void)flags;
+    web_tx_t *tx = find_tx(fd);
+    if (tx == NULL || tx->failed) {
+        return HTTPD_SOCK_ERR_FAIL;
+    }
+    if (tx->offset > 0) {
+        memmove(tx->bytes, tx->bytes + tx->offset, tx->length - tx->offset);
+        tx->length -= tx->offset;
+        tx->offset = 0;
+    }
+    if (len > sizeof(tx->bytes) - tx->length) {
+        /* Only protocol/control flooding can fill this: telemetry checks space
+         * before handing a whole frame to HTTPD. Never truncate a frame. */
+        return HTTPD_SOCK_ERR_FAIL;
+    }
+    memcpy(tx->bytes + tx->length, buf, len);
+    tx->length += len;
+    (void)flush_tx(tx);
+    return tx->failed ? HTTPD_SOCK_ERR_FAIL : (int)len;
+}
+
+static esp_err_t init_tx(int fd)
+{
+    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
+        if (!client_tx[i].active) {
+            client_tx[i] = (web_tx_t){ .active = true, .fd = fd };
+            const esp_err_t err = httpd_sess_set_send_override(server, fd, buffered_send);
+            if (err != ESP_OK) {
+                memset(&client_tx[i], 0, sizeof(client_tx[i]));
+            }
+            return err;
+        }
+    }
+    return ESP_ERR_NO_MEM;
 }
 
 static bool send_text(int fd, const char *text)
 {
+    if (httpd_ws_get_fd_info(server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+        release_controller(fd);
+        return false;
+    }
+    web_tx_t *tx = find_tx(fd);
+    if (tx == NULL || !flush_tx(tx)) {
+        return false; /* Drop this NEW frame, retain any already partially sent. */
+    }
+    const size_t len = strlen(text);
+    if (len + 10 > sizeof(tx->bytes)) {
+        return false;
+    }
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)text,
-        .len = strlen(text),
+        .len = len,
     };
-    if (httpd_ws_send_frame_async(server, fd, &frame) == ESP_OK) {
-        return true;
-    }
-    release_controller(fd);
-    /* Let HTTPD remove the session through close_fn. Do not close/reuse fd here. */
-    shutdown(fd, SHUT_RDWR);
-    ESP_LOGW(TAG, "WebSocket TX failed fd=%d", fd);
-    return false;
+    return httpd_ws_send_frame_async(server, fd, &frame) == ESP_OK;
 }
 
 /* HTTP task only. Status is personalized: controller=true only for its owner. */
@@ -856,7 +1010,11 @@ static void broadcast_control(void)
         snprintf(json, sizeof(json),
                  "{\"type\":\"control\",\"controller\":%s,\"occupied\":%s}",
                  owner == fd ? "true" : "false", owner >= 0 ? "true" : "false");
-        send_text(fd, json);
+        if (!send_text(fd, json)) {
+            portENTER_CRITICAL(&state_mux);
+            control_dirty = true; /* Retry control status; telemetry is disposable. */
+            portEXIT_CRITICAL(&state_mux);
+        }
     }
 }
 
@@ -904,13 +1062,9 @@ static esp_err_t websocket_handler(httpd_req_t *req)
 {
     const int fd = httpd_req_to_sockfd(req);
     if (req->method == HTTP_GET) {
-        /* Short sends only for WebSockets; HTML uses config.send_wait_timeout. */
-        const struct timeval timeout = {
-            .tv_sec = WEB_SOCKET_SEND_TIMEOUT_MS / 1000,
-            .tv_usec = (WEB_SOCKET_SEND_TIMEOUT_MS % 1000) * 1000,
-        };
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) {
-            return ESP_FAIL;
+        const esp_err_t tx_err = init_tx(fd);
+        if (tx_err != ESP_OK) {
+            return tx_err;
         }
         /* HTTPD completes the upgrade after this handler returns. The next queued
          * broadcast discovers the new session, without retaining its descriptor. */
@@ -1023,6 +1177,11 @@ void web_server_update_telemetry(const quadmd_telemetry_t *telemetry)
 static void broadcast_work(void *arg)
 {
     (void)arg;
+    for (size_t i = 0; i < WEB_MAX_CLIENTS; ++i) {
+        if (client_tx[i].active) {
+            (void)flush_tx(&client_tx[i]);
+        }
+    }
     (void)controller_is_valid();
     portENTER_CRITICAL(&state_mux);
     const bool dirty = control_dirty;
@@ -1124,7 +1283,10 @@ esp_err_t web_server_start(void)
         err = esp_timer_create(&timer_args, &lease_timer);
     }
     if (err == ESP_OK) {
-        err = esp_timer_start_periodic(lease_timer, 1000);
+        err = esp_timer_start_periodic(
+            lease_timer,
+            CONTROLLER_LEASE_CHECK_PERIOD_US
+        );
     }
     if (err == ESP_OK && xTaskCreatePinnedToCore(telemetry_web_task,
             "web_telemetry", 4096, NULL, 4, NULL, 0) != pdPASS) {

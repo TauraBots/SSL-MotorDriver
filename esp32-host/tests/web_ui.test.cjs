@@ -26,6 +26,17 @@ function element(id) {
 }
 const sockets = [];
 const intervals = [];
+let now = 0, nextTimer = 0;
+const timers = new Map();
+function advance(ms) {
+    const end = now + ms;
+    for (;;) {
+        const next = [...timers].filter(([, t]) => t.at <= end).sort((a,b) => a[1].at-b[1].at)[0];
+        if (!next) break;
+        timers.delete(next[0]); now = next[1].at; next[1].callback();
+    }
+    now = end;
+}
 const windowEvents = {};
 const documentEvents = {};
 class WebSocket {
@@ -47,7 +58,9 @@ const context = vm.createContext({
         },
     },
     window: {addEventListener(type, cb) { windowEvents[type] = cb; }},
-    setInterval(callback, ms) { intervals.push({callback, ms}); }, setTimeout() {},
+    setInterval(callback, ms) { intervals.push({callback, ms}); },
+    setTimeout(callback, ms) { const id = ++nextTimer; timers.set(id, {callback, at: now + ms}); return id; },
+    clearTimeout(id) { timers.delete(id); },
 });
 vm.runInContext(script, context);
 const run = code => vm.runInContext(code, context);
@@ -59,7 +72,25 @@ function key(type, code, repeat = false) {
     return prevented;
 }
 ws.onopen();
-assert.deepEqual(ws.sent, ['CLAIM_CONTROL'], 'exactly one automatic claim on open');
+assert.deepEqual(ws.sent, [], 'claim waits until after open');
+advance(100);
+assert.deepEqual(ws.sent, ['CLAIM_CONTROL'], 'delayed initial claim');
+// Old controller still owns lease. Do not poll it with claims.
+ws.onmessage({data: JSON.stringify({type:'control', controller:false, occupied:true})});
+advance(1500);
+assert.equal(ws.sent.length, 1, 'occupied=true does not loop');
+// Server announces expiry: no reload or button click is needed.
+ws.onmessage({data: JSON.stringify({type:'control', controller:false, occupied:false})});
+advance(100);
+assert.equal(ws.sent.length, 2, 'occupied=false retries claim');
+// Repeated free notifications cannot bypass the cooldown.
+for (let i=0;i<10;i++) ws.onmessage({data: JSON.stringify({type:'control', controller:false, occupied:false})});
+advance(200);
+assert.equal(ws.sent.length, 2);
+status(true);
+advance(1000);
+assert.equal(ws.sent.length, 2, 'controller=true cancels retry and cooldown');
+status(false);
 ws.sent.length = 0;
 const heartbeat = intervals.find(timer => timer.ms === heartbeatMs);
 assert.ok(heartbeat, 'heartbeat uses configured interval');
@@ -95,6 +126,13 @@ assert.equal(ws.sent.at(-1), 'CMD,0.000,0.000,0.000,0,1');
 run('toggleControl()');
 assert.equal(ws.sent.at(-1), 'RELEASE_CONTROL');
 assert.equal(run('isController'), false);
+const afterRelease = ws.sent.length;
+ws.onmessage({data: JSON.stringify({type:'control', controller:false, occupied:false})});
+advance(1000);
+assert.equal(ws.sent.length, afterRelease, 'manual release must not immediately auto-claim');
+run('toggleControl()');
+assert.equal(ws.sent.at(-1), 'CLAIM_CONTROL', 'manual claim re-enables control');
+status(false);
 ws.onmessage({data: JSON.stringify({battery: 12.3, rpm: [1,2,3,4], comm: true,
     watchdog: true, fault: 2, sequence: 42})});
 assert.equal(element('sequence').innerText, 42);
@@ -195,4 +233,4 @@ assert.equal(ws.sent.length, afterClose, 'no heartbeat after disconnect');
 console.log('PASS: spectator guards, claim/release, movement, one-shot kick, control loss, telemetry, disconnect');
 console.log('PASS: WASD/Q/E combinations, touch coexistence, SPACE, repeat, blur, visibility, keyboard ownership');
 
-console.log("PASS: single automatic claim, configured heartbeat, spectator/disconnect guards");
+console.log("PASS: denied claim recovery, occupied guard, cooldown, manual release, heartbeat");

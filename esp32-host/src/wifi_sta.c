@@ -1,10 +1,12 @@
 #include "wifi_sta.h"
 #include "mdns_service.h"
+#include "app_config.h"
 
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -34,6 +36,111 @@ static EventGroupHandle_t
 
 static int
     retry_count = 0;
+
+static wifi_status_t
+    wifi_status =
+        {
+            .rssi = -127
+        };
+
+static portMUX_TYPE
+    wifi_status_mux =
+        portMUX_INITIALIZER_UNLOCKED;
+
+// Project diagnostic labels, not an official Espressif classification.
+const char *wifi_rssi_quality(int rssi)
+{
+    if (rssi >= -50)
+    {
+        return "EXCELENTE";
+    }
+
+    if (rssi >= -59)
+    {
+        return "FORTE";
+    }
+
+    if (rssi >= -67)
+    {
+        return "BOM";
+    }
+
+    if (rssi >= -75)
+    {
+        return "FRACO";
+    }
+
+    return "CRITICO";
+}
+
+bool wifi_sta_get_status(wifi_status_t *status)
+{
+    if (status == NULL)
+    {
+        return false;
+    }
+
+    portENTER_CRITICAL(&wifi_status_mux);
+    *status = wifi_status;
+    portEXIT_CRITICAL(&wifi_status_mux);
+
+    return status->connected;
+}
+
+static void wifi_status_set_connected(bool connected)
+{
+    portENTER_CRITICAL(&wifi_status_mux);
+    wifi_status.connected = connected;
+    portEXIT_CRITICAL(&wifi_status_mux);
+}
+
+static void wifi_status_update_ap(const wifi_ap_record_t *ap_info)
+{
+    portENTER_CRITICAL(&wifi_status_mux);
+    wifi_status.connected = true;
+    wifi_status.rssi = ap_info->rssi;
+    wifi_status.channel = ap_info->primary;
+    portEXIT_CRITICAL(&wifi_status_mux);
+}
+
+static void wifi_monitor_task(void *arg)
+{
+    (void)arg;
+
+    bool ap_logged = false;
+
+    while (1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(WIFI_MONITOR_PERIOD_MS));
+
+        wifi_status_t status;
+        (void)wifi_sta_get_status(&status);
+
+        if (!status.connected)
+        {
+            ap_logged = false;
+            continue;
+        }
+
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK)
+        {
+            continue;
+        }
+
+        wifi_status_update_ap(&ap_info);
+        ESP_LOGI(TAG, "RSSI: %d dBm | Sinal: %s",
+                 ap_info.rssi, wifi_rssi_quality(ap_info.rssi));
+
+        if (!ap_logged)
+        {
+            ESP_LOGI(TAG, "SSID: %.*s | Channel: %u",
+                     (int)sizeof(ap_info.ssid), ap_info.ssid,
+                     (unsigned int)ap_info.primary);
+            ap_logged = true;
+        }
+    }
+}
 
 // ============================================================
 // EVENT HANDLER
@@ -78,8 +185,13 @@ static void wifi_event_handler(
     )
     {
         const wifi_event_sta_disconnected_t *disconnected = event_data;
-        ESP_LOGW(TAG, "STA desconectada: reason=%u, RSSI=%d dBm",
-                 (unsigned int)disconnected->reason, (int)disconnected->rssi);
+        wifi_status_t previous;
+        (void)wifi_sta_get_status(&previous);
+        wifi_status_set_connected(false);
+        ESP_LOGW(TAG, "DESCONECTADO");
+        ESP_LOGW(TAG, "reason=%u", (unsigned int)disconnected->reason);
+        ESP_LOGW(TAG, "ultimo RSSI=%d dBm | sinal anterior=%s",
+                 previous.rssi, wifi_rssi_quality(previous.rssi));
         if (
             retry_count <
             WIFI_MAX_RETRY
@@ -128,6 +240,8 @@ static void wifi_event_handler(
             event_data;
 
         retry_count = 0;
+
+        wifi_status_set_connected(true);
 
         ESP_LOGI(
             TAG,
@@ -325,6 +439,24 @@ esp_err_t wifi_sta_init(void)
     );
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
+    ESP_LOGI(TAG, "Power save: DISABLED");
+    ESP_LOGI(TAG, "TX power requested: %.1f dBm",
+             WIFI_TX_POWER_DBM / 1.0f);
+    ESP_ERROR_CHECK(
+        esp_wifi_set_max_tx_power(
+            WIFI_TX_POWER_QUARTER_DBM
+        )
+    );
+
+    int8_t tx_power = 0;
+    ESP_ERROR_CHECK(
+        esp_wifi_get_max_tx_power(
+            &tx_power
+        )
+    );
+    ESP_LOGI(TAG, "TX power active: %.2f dBm",
+             tx_power / 4.0f);
+
     // ========================================================
     // Aguarda resultado
     // ========================================================
@@ -349,6 +481,17 @@ esp_err_t wifi_sta_init(void)
         WIFI_CONNECTED_BIT
     )
     {
+        if (xTaskCreate(
+                wifi_monitor_task,
+                "wifi_monitor",
+                3072,
+                NULL,
+                4,
+                NULL) != pdPASS)
+        {
+            return ESP_ERR_NO_MEM;
+        }
+
         ESP_LOGI(
             TAG,
             "Conectado em \"%s\"",
