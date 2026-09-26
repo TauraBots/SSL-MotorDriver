@@ -59,7 +59,6 @@
 extern TIM_HandleTypeDef htim6;
 extern DMA_HandleTypeDef hdma_usart2_rx;
 extern DMA_HandleTypeDef hdma_usart2_tx;
-extern UART_HandleTypeDef huart2;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -91,7 +90,6 @@ void HardFault_Handler(void)
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
   /* USER CODE END HardFault_IRQn 0 */
-  AppC_EmergencyStop();
   while (1)
   {
     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
@@ -107,7 +105,6 @@ void MemManage_Handler(void)
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
 
   /* USER CODE END MemoryManagement_IRQn 0 */
-  AppC_EmergencyStop();
   while (1)
   {
     /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
@@ -123,7 +120,6 @@ void BusFault_Handler(void)
   /* USER CODE BEGIN BusFault_IRQn 0 */
 
   /* USER CODE END BusFault_IRQn 0 */
-  AppC_EmergencyStop();
   while (1)
   {
     /* USER CODE BEGIN W1_BusFault_IRQn 0 */
@@ -139,7 +135,6 @@ void UsageFault_Handler(void)
   /* USER CODE BEGIN UsageFault_IRQn 0 */
 
   /* USER CODE END UsageFault_IRQn 0 */
-  AppC_EmergencyStop();
   while (1)
   {
     /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
@@ -219,7 +214,6 @@ void DMA1_Channel6_IRQHandler(void)
   /* USER CODE BEGIN DMA1_Channel6_IRQn 1 */
 
   /* USER CODE END DMA1_Channel6_IRQn 1 */
-
 }
 
 /**
@@ -234,20 +228,6 @@ void DMA1_Channel7_IRQHandler(void)
   /* USER CODE BEGIN DMA1_Channel7_IRQn 1 */
 
   /* USER CODE END DMA1_Channel7_IRQn 1 */
-}
-
-/**
-  * @brief This function handles USART2 global interrupt.
-  */
-void USART2_IRQHandler(void)
-{
-  /* USER CODE BEGIN USART2_IRQn 0 */
-
-  /* USER CODE END USART2_IRQn 0 */
-  HAL_UART_IRQHandler(&huart2);
-  /* USER CODE BEGIN USART2_IRQn 1 */
-
-  /* USER CODE END USART2_IRQn 1 */
 }
 
 /**
