@@ -16,6 +16,14 @@ static void assert_safe(void)
     web_server_get_command(&c);
     assert(c.vx==0 && c.vy==0 && c.omega==0 && c.kick_power==0 && c.brake);
 }
+static bool wire_contains(int fd, const char *text)
+{
+    const size_t length = strlen(text);
+    for (size_t i=0; i+length<=peers[fd].used; ++i) {
+        if (memcmp(peers[fd].wire+i, text, length)==0) return true;
+    }
+    return false;
+}
 int main(void)
 {
     assert(web_server_start()==ESP_OK);
@@ -83,9 +91,20 @@ int main(void)
 
     /* Telemetry broadcast remains multi-client. */
     connect_peer(12);
+    quadmd_telemetry_t telemetry = {
+        .valid=true, .battery_voltage=11.835f, .rpm={1,2,3,4},
+        .communication_ok=true, .watchdog_ok=true, .fault_status=0,
+        .last_command_sequence=42,
+    };
+    web_server_update_telemetry(&telemetry);
     peers[11].used=peers[12].used=0;
     broadcast_work(NULL);
     assert(peers[11].used>0 && peers[12].used>0);
+    assert(wire_contains(11, "\"type\":\"telemetry\""));
+    assert(wire_contains(12, "\"type\":\"telemetry\""));
+    assert(wire_contains(11, "\"battery\":11.835"));
+    assert(wire_contains(12, "\"rssi\":-61"));
+    assert(active_fd==-1); /* Observers receive telemetry without taking control. */
     assert(critical_depth==0);
     puts("PASS: active_fd takeover/release, global stop, watchdog, TX isolation, telemetry, disconnect");
     return 0;

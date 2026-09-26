@@ -131,11 +131,14 @@ assert.equal(key('keydown', 'KeyQ'), false);
 context.document.hidden = false;
 documentEvents.visibilitychange();
 
-ws.onmessage({data: JSON.stringify({battery: 12.3, rpm: [1,2,3,4], comm: true,
-    watchdog: true, fault: 2, sequence: 42})});
+assert.equal(run('haveControl'), false);
+ws.onmessage({data: JSON.stringify({type: 'telemetry', battery: 12.3,
+    rpm: [1,2,3,4], comm: true, watchdog: true, fault: 2, sequence: 42,
+    rssi: -61})});
 assert.equal(element('sequence').innerText, 42);
 assert.equal(element('battery').innerText, '12.300');
 assert.equal(element('fault').innerText, '0x02');
+assert.equal(element('rssi').innerText, -61);
 
 key('keydown', 'KeyW');
 const beforePagehide = ws.sent.length;

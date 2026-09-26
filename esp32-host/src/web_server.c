@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "app_config.h"
+#include "wifi_sta.h"
 
 #define WEB_MAX_CLIENTS 8
 
@@ -289,6 +290,9 @@ static const char index_html[] =
 "<div>Fault</div>"
 "<div class='value' id='fault'>--</div>"
 
+"<div>Wi-Fi RSSI</div>"
+"<div class='value'><span id='rssi'>--</span> dBm</div>"
+
 "</div>"
 
 "<script>"
@@ -429,6 +433,10 @@ static const char index_html[] =
 "if(d.type==='active'){"
 "setActive(d.active===true);"
 "return;}"
+"if(d.type==='telemetry')updateTelemetry(d);"
+"};"
+
+"function updateTelemetry(d){"
 "document.getElementById('sequence').innerText=d.sequence;"
 "if(d.battery!==undefined){"
 
@@ -464,9 +472,9 @@ static const char index_html[] =
 "d.fault.toString(16)"
 ".padStart(2,'0')"
 ".toUpperCase();"
+"if(d.rssi!==undefined)document.getElementById('rssi').innerText=d.rssi;"
 
-"};"
-
+"}"
 "}"
 
 "connectWS();"
@@ -1109,22 +1117,36 @@ static void broadcast_work(void *arg)
     if (dirty) {
         broadcast_active();
     }
-    char json[384];
+    wifi_status_t wifi = { .rssi = -127 };
+    (void)wifi_sta_get_status(&wifi);
+    char json[448];
     const int len = snprintf(json, sizeof(json),
-        "{\"valid\":%s,\"battery\":%.3f,\"rpm\":[%.1f,%.1f,%.1f,%.1f],"
-        "\"cmd\":[%d,%d,%d,%d],\"comm\":%s,\"watchdog\":%s,\"fault\":%u,\"sequence\":%lu}",
+        "{\"type\":\"telemetry\",\"valid\":%s,\"battery\":%.3f,"
+        "\"rpm\":[%.1f,%.1f,%.1f,%.1f],\"cmd\":[%d,%d,%d,%d],"
+        "\"comm\":%s,\"watchdog\":%s,\"fault\":%u,\"sequence\":%lu,"
+        "\"wifi_connected\":%s,\"rssi\":%d}",
         t.valid ? "true" : "false", t.battery_voltage,
         t.rpm[0], t.rpm[1], t.rpm[2], t.rpm[3],
         t.motor_command[0], t.motor_command[1], t.motor_command[2], t.motor_command[3],
         t.communication_ok ? "true" : "false", t.watchdog_ok ? "true" : "false",
-        (unsigned int)t.fault_status, (unsigned long)t.last_command_sequence);
+        (unsigned int)t.fault_status, (unsigned long)t.last_command_sequence,
+        wifi.connected ? "true" : "false", wifi.rssi);
     int clients[WEB_MAX_CLIENTS];
     size_t count = WEB_MAX_CLIENTS;
     if (len > 0 && len < (int)sizeof(json) &&
         httpd_get_client_list(server, &count, clients) == ESP_OK) {
+        int websocket_clients[WEB_MAX_CLIENTS];
+        size_t websocket_count = 0;
         for (size_t i = 0; i < count; ++i) {
             if (httpd_ws_get_fd_info(server, clients[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-                send_text(clients[i], json);
+                websocket_clients[websocket_count++] = clients[i];
+            }
+        }
+        if (websocket_count > 0) {
+            ESP_LOGI(TAG, "Broadcasting telemetry to %u clients",
+                     (unsigned int)websocket_count);
+            for (size_t i = 0; i < websocket_count; ++i) {
+                (void)send_text(websocket_clients[i], json);
             }
         }
     }

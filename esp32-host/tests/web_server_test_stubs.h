@@ -39,6 +39,10 @@ static void mock_log(const char *tag, const char *format, ...) { (void)tag; (voi
 #define ESP_LOGW mock_log
 static int64_t mock_now = 100000;
 static int64_t esp_timer_get_time(void) { return mock_now; }
+typedef struct { bool connected; int rssi; uint8_t channel; } wifi_status_t;
+static bool wifi_sta_get_status(wifi_status_t *status) {
+    *status=(wifi_status_t){.connected=true,.rssi=-61,.channel=6}; return true;
+}
 static void vTaskDelay(TickType_t t) { (void)t; }
 static int xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, int stack, void *arg, int priority, void *handle, int core) {
     (void)fn; (void)name; (void)stack; (void)arg; (void)priority; (void)handle; (void)core; return pdPASS;
@@ -81,9 +85,16 @@ static int mock_close(int fd) { assert(!critical_depth); peers[fd].info=HTTPD_WS
 static httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t h, int fd) { (void)h; assert(!critical_depth); return peers[fd].info; }
 static esp_err_t httpd_sess_set_send_override(httpd_handle_t h, int fd, send_fn_t fn) { (void)h; assert(!critical_depth); peers[fd].sender=fn; return ESP_OK; }
 static esp_err_t httpd_ws_send_frame_async(httpd_handle_t h, int fd, httpd_ws_frame_t *frame) {
-    assert(!critical_depth && frame->len<126);
-    unsigned char header[2] = {(unsigned char)(0x80|frame->type), (unsigned char)frame->len};
-    if (peers[fd].sender(h,fd,(const char *)header,2,0)<0) return ESP_FAIL;
+    assert(!critical_depth && frame->len<=UINT16_MAX);
+    unsigned char header[4] = {(unsigned char)(0x80|frame->type), 0, 0, 0};
+    size_t header_len=2;
+    if (frame->len<126) {
+        header[1]=(unsigned char)frame->len;
+    } else {
+        header[1]=126; header[2]=(unsigned char)(frame->len>>8);
+        header[3]=(unsigned char)frame->len; header_len=4;
+    }
+    if (peers[fd].sender(h,fd,(const char *)header,header_len,0)<0) return ESP_FAIL;
     if (frame->len && peers[fd].sender(h,fd,(const char *)frame->payload,frame->len,0)<0) return ESP_FAIL;
     return ESP_OK;
 }
