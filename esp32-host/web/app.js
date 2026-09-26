@@ -94,6 +94,7 @@ function connectWebSocket() {
   };
 
   socket.onmessage = event => {
+    console.log('[RX RAW]', event.data);
     let data;
     try {
       data = JSON.parse(event.data);
@@ -112,7 +113,7 @@ function handleMessage(data) {
     return;
   }
   if (data.type === 'telemetry') {
-    handleTelemetry(data);
+    updateTelemetry(data);
     return;
   }
   if (data.type === 'active') {
@@ -126,28 +127,38 @@ function handleActive(data) {
   setActive(data.active === true);
 }
 
-function handleTelemetry(data) {
+function updateTelemetry(data) {
   state.telemetry = {...state.telemetry, ...data};
 
-  if (data.battery !== undefined && Number.isFinite(Number(data.battery))) {
-    UI.battery.innerText = `${Number(data.battery).toFixed(3)} V`;
-  } else if (data.battery === undefined) {
-    console.warn('[RX] telemetry sem battery');
+  const battery = Number(data.battery);
+  if (data.battery !== undefined && Number.isFinite(battery)) {
+    UI.battery.innerText = `${battery.toFixed(3)} V`;
+  } else {
+    console.warn('[RX] telemetry sem battery valida', data.battery);
   }
 
   if (Array.isArray(data.rpm) && data.rpm.length >= 4) {
-    [UI.rpm1.innerText, UI.rpm2.innerText, UI.rpm3.innerText, UI.rpm4.innerText] = data.rpm;
+    UI.rpm1.innerText = String(data.rpm[0]);
+    UI.rpm2.innerText = String(data.rpm[1]);
+    UI.rpm3.innerText = String(data.rpm[2]);
+    UI.rpm4.innerText = String(data.rpm[3]);
   } else {
     console.warn('[RX] telemetry sem rpm[4]');
   }
 
   if (data.comm !== undefined) UI.comm.innerText = data.comm ? 'OK' : 'LOST';
   if (data.watchdog !== undefined) UI.watchdog.innerText = data.watchdog ? 'OK' : 'ERRO';
-  if (data.sequence !== undefined) UI.sequence.innerText = data.sequence;
-  if (data.fault !== undefined && Number.isFinite(Number(data.fault))) {
-    UI.fault.innerText = `0x${Number(data.fault).toString(16).padStart(2, '0').toUpperCase()}`;
+  if (data.sequence !== undefined) UI.sequence.innerText = String(data.sequence);
+
+  const fault = Number(data.fault);
+  if (data.fault !== undefined && Number.isFinite(fault)) {
+    UI.fault.innerText = `0x${fault.toString(16).padStart(2, '0').toUpperCase()}`;
   }
-  if (data.rssi !== undefined) UI.rssi.innerText = `${data.rssi} dBm`;
+
+  const rssi = Number(data.rssi);
+  if (data.rssi !== undefined && Number.isFinite(rssi)) {
+    UI.rssi.innerText = `${rssi} dBm`;
+  }
 }
 
 function updateMotion() {

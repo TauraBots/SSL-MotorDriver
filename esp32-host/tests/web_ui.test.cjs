@@ -147,14 +147,21 @@ ws.onmessage({data: JSON.stringify({type: 'telemetry', battery: 11.835,
     rssi: -60})});
 assert.equal(element('battery').innerText, '11.835 V');
 assert.deepEqual([element('rpm1').innerText, element('rpm2').innerText,
-    element('rpm3').innerText, element('rpm4').innerText], [0,0,0,0]);
+    element('rpm3').innerText, element('rpm4').innerText], ['0','0','0','0']);
 assert.equal(element('watchdog').innerText, 'OK');
-assert.equal(element('sequence').innerText, 10);
+assert.equal(element('sequence').innerText, '10');
 assert.equal(element('fault').innerText, '0x00');
 assert.equal(element('rssi').innerText, '-60 dBm');
 assert.equal(run('state.active'), false, 'telemetry must not take control');
 assert.equal(run('state.telemetry.battery'), 11.835);
 assert.ok(consoleMessages.some(entry => entry[0] === 'log' && entry[1] === '[RX]'));
+assert.ok(consoleMessages.some(entry => entry[0] === 'log' && entry[1] === '[RX RAW]'));
+
+ws.onmessage({data: JSON.stringify({type: 'telemetry', battery: 11.799,
+    rpm: [0,0,0,0], rssi: -37})});
+assert.equal(element('battery').innerText, '11.799 V');
+assert.equal(element('rpm4').innerText, '0');
+assert.equal(element('rssi').innerText, '-37 dBm');
 
 const renderedBattery = element('battery').innerText;
 ws.onmessage({data: JSON.stringify({type: 'telemetry'})});
