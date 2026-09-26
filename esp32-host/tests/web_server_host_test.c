@@ -56,6 +56,7 @@ int main(void)
     mock_now+=300000; message(10,"HEARTBEAT");
     assert_safe(); assert(controller_fd==10); /* Heartbeat cannot refresh motion. */
     message(11,"RELEASE_CONTROL"); assert(controller_fd==10);
+    control_dirty=false;
     mock_now+=CONTROLLER_LEASE_TIMEOUT_MS*1000LL;
     lease_timer_callback(NULL);
     assert(controller_fd==-1 && control_dirty); assert_safe();

@@ -802,6 +802,7 @@ static void expire_controller_locked(int64_t now)
     if (controller_fd >= 0 &&
         now - controller_last_seen_us >= CONTROLLER_LEASE_TIMEOUT_MS * 1000LL) {
         clear_controller_locked();
+        control_dirty = true;
         lease_expired_log = true;
     }
 }
