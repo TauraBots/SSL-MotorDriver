@@ -15,8 +15,6 @@
 #include "app_config.h"
 
 #define WEB_MAX_CLIENTS 8
-#define STRINGIFY_VALUE_(value) #value
-#define STRINGIFY_VALUE(value) STRINGIFY_VALUE_(value)
 
 static const char *TAG = "WEB";
 static portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -24,12 +22,9 @@ static float command_vx, command_vy, command_omega;
 static uint8_t command_kick;
 static bool command_brake = true;
 static int64_t last_command_us;
-static int controller_fd = -1;
-static int64_t controller_last_seen_us;
-static esp_timer_handle_t lease_timer;
-static bool lease_expired_log;
+static int active_fd = -1;
 static quadmd_telemetry_t telemetry_snapshot;
-static bool control_dirty = true;
+static bool active_dirty = true;
 static bool broadcast_pending;
 /* Immutable after startup; all session operations run on the HTTP task. */
 static httpd_handle_t server;
@@ -183,8 +178,7 @@ static const char index_html[] =
 "<span id='connection' class='offline'>OFFLINE</span>"
 "</div>"
 
-"<div class='status'><span id='role'>ESPECTADOR</span></div>"
-"<button id='controlButton' disabled onclick='toggleControl()'>ASSUMIR CONTROLE</button>"
+"<div class='status'>Controle: <span id='controlState'>INATIVO</span></div>"
 "<p class='keyboard-help'>WASD: movimento | Q/E: rota&ccedil;&atilde;o | Espa&ccedil;o: STOP</p>"
 "<div class='panel'>"
 
@@ -304,34 +298,15 @@ static const char index_html[] =
 // ============================================================
 
 "let ws=null;"
-"let isController=false;"
-"let occupied=null,claimPending=false,autoClaim=true;"
-"let claimTimer=null,claimCooldown=null;"
-"function cancelClaimTimers(){"
-"clearTimeout(claimTimer);clearTimeout(claimCooldown);"
-"claimTimer=claimCooldown=null;claimPending=false;"
-"}"
-"function scheduleClaim(){"
-"if(!autoClaim||occupied===true||isController||claimPending||claimTimer!==null||"
-"!pageFocused||document.hidden)return;"
-"const socket=ws;"
-"claimTimer=setTimeout(()=>{claimTimer=null;if(ws===socket)claimControl();},100);"
-"}"
-"function claimControl(){"
-"if(!ws||ws.readyState!==WebSocket.OPEN||isController||claimPending||"
-"!pageFocused||document.hidden)return;"
-"claimPending=true;ws.send('CLAIM_CONTROL');"
-"claimCooldown=setTimeout(()=>{"
-"claimCooldown=null;claimPending=false;"
-"if(occupied===false)scheduleClaim();"
-"},300);"
-"}"
+"let haveControl=false;"
 "const joystickResets=[];"
 "const pressedKeys=new Set();"
 "const controlKeys=new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','Space']);"
 "let joystickX=0,joystickY=0,joystickRotation=0;"
 "let pageFocused=document.hasFocus();"
-"function canControl(){return isController&&pageFocused&&!document.hidden;}"
+"function canInteract(){"
+"return ws&&ws.readyState===WebSocket.OPEN&&pageFocused&&!document.hidden;"
+"}"
 "function updateMotion(){"
 "const key=code=>pressedKeys.has(code)?1:0;"
 "const x=joystickX+key('KeyD')-key('KeyA');"
@@ -346,25 +321,16 @@ static const char index_html[] =
 "moveX=moveY=rotX=kickPending=0;emergency=true;"
 "joystickResets.forEach(reset=>reset());"
 "}"
-"function setControl(value){"
-"if(isController!==value||!value){resetControls();}"
-"isController=value;"
-"if(value)cancelClaimTimers();"
-"document.getElementById('role').innerText=value?'CONTROLADOR':'ESPECTADOR';"
-"document.getElementById('controlButton').innerText=value?'LIBERAR CONTROLE':'ASSUMIR CONTROLE';"
-"document.querySelectorAll('input,.kick,.stop').forEach(el=>el.disabled=!value);"
-"document.querySelectorAll('.joystick').forEach(el=>el.classList.toggle('disabled',!value));"
+"function setActive(value){"
+"if(haveControl&&!value)resetControls();"
+"haveControl=value;"
+"document.getElementById('controlState').innerText=value?'ATIVO':'INATIVO';"
 "}"
-"function toggleControl(){"
-"if(!ws||ws.readyState!==1)return;"
-"if(isController){"
-"autoClaim=false;cancelClaimTimers();ws.send('RELEASE_CONTROL');setControl(false);"
-"}else{autoClaim=true;claimControl();}"
+"function requestControl(){"
+"if(!canInteract())return false;"
+"if(!haveControl){ws.send('TAKE_CONTROL');setActive(true);}"
+"return true;"
 "}"
-"window.addEventListener('pagehide',()=>{"
-"if(ws&&ws.readyState===1){if(isController)ws.send('RELEASE_CONTROL');ws.close();}"
-"setControl(false);"
-"});"
 
 "let moveX=0;"
 "let moveY=0;"
@@ -418,8 +384,7 @@ static const char index_html[] =
 ");"
 
 "ws.onopen=()=>{"
-"setControl(false);document.getElementById('controlButton').disabled=false;"
-"cancelClaimTimers();occupied=null;autoClaim=true;scheduleClaim();"
+"setActive(false);"
 
 "document.getElementById('connection').innerText="
 "'ONLINE';"
@@ -430,8 +395,7 @@ static const char index_html[] =
 "};"
 
 "ws.onclose=()=>{"
-"cancelClaimTimers();occupied=null;"
-"setControl(false);document.getElementById('controlButton').disabled=true;"
+"setActive(false);"
 
 "document.getElementById('connection').innerText="
 "'OFFLINE';"
@@ -447,7 +411,7 @@ static const char index_html[] =
 "};"
 
 "ws.onerror=()=>{"
-"setControl(false);"
+"setActive(false);"
 "ws.close();"
 "};"
 
@@ -462,10 +426,8 @@ static const char index_html[] =
 "return;"
 "}"
 
-"if(d.type==='control'){"
-"occupied=d.occupied;setControl(d.controller===true);"
-"if(occupied===true){clearTimeout(claimTimer);claimTimer=null;}"
-"else if(occupied===false){scheduleClaim();}"
+"if(d.type==='active'){"
+"setActive(d.active===true);"
 "return;}"
 "document.getElementById('sequence').innerText=d.sequence;"
 "if(d.battery!==undefined){"
@@ -529,7 +491,7 @@ static const char index_html[] =
 "let active=false;"
 
 "function update(e){"
-"if(!canControl())return;"
+"if(!haveControl)return;"
 
 "const r="
 "base.getBoundingClientRect();"
@@ -582,7 +544,7 @@ static const char index_html[] =
 "'pointerdown',"
 "e=>{"
 
-"if(!canControl())return;"
+"if(!requestControl())return;"
 "active=true;"
 
 "base.setPointerCapture("
@@ -662,7 +624,7 @@ static const char index_html[] =
 // ============================================================
 
 "function kick(){"
-"if(!canControl())return;"
+"if(!requestControl())return;"
 
 "kickPending="
 "parseInt("
@@ -676,16 +638,8 @@ static const char index_html[] =
 // ============================================================
 
 "function emergencyStop(){"
-"if(!canControl())return;resetControls();"
-
-"moveX=0;"
-"moveY=0;"
-"rotX=0;"
-
-"kickPending=0;"
-
-"emergency=true;"
-
+"if(!canInteract())return;"
+"ws.send('EMERGENCY_STOP');resetControls();setActive(false);"
 "}"
 
 // ============================================================
@@ -695,7 +649,7 @@ static const char index_html[] =
 "function sendCommand(){"
 
 "if("
-"!isController || !pageFocused || document.hidden || !ws || "
+"!haveControl || !pageFocused || document.hidden || !ws || "
 "ws.readyState!==1"
 "){"
 
@@ -744,24 +698,28 @@ static const char index_html[] =
 
 // Keyboard and touch feed the same motion state; sendCommand remains the only CMD sender.
 "window.addEventListener('keydown',e=>{"
-"if(!canControl()||!controlKeys.has(e.code))return;"
+"if(!controlKeys.has(e.code)||!canInteract())return;"
 "e.preventDefault();"
 "if(e.repeat)return;"
 "if(e.code==='Space'){emergencyStop();pressedKeys.add('Space');return;}"
 "if(pressedKeys.has('Space'))return;"
+"if(!requestControl())return;"
 "pressedKeys.add(e.code);updateMotion();"
 "});"
 "window.addEventListener('keyup',e=>{"
-"if(!canControl()||!controlKeys.has(e.code))return;"
+"if(!controlKeys.has(e.code))return;"
 "e.preventDefault();pressedKeys.delete(e.code);updateMotion();"
 "});"
 "function sendSafeStop(){"
-"if(ws&&ws.readyState===WebSocket.OPEN&&isController)"
+"if(ws&&ws.readyState===WebSocket.OPEN&&haveControl)"
 "ws.send('CMD,0,0,0,0,1');"
 "}"
+"function releaseControl(){"
+"if(ws&&ws.readyState===WebSocket.OPEN&&haveControl)ws.send('RELEASE_CONTROL');"
+"setActive(false);"
+"}"
 "function pausePage(){"
-"const wasActive=pageFocused;pageFocused=false;resetControls();"
-"if(wasActive)sendSafeStop();"
+"pageFocused=false;resetControls();sendSafeStop();releaseControl();"
 "}"
 "window.addEventListener('blur',pausePage);"
 "window.addEventListener('focus',()=>{pageFocused=true;});"
@@ -770,11 +728,10 @@ static const char index_html[] =
 "else{pageFocused=document.hasFocus();}"
 "});"
 
-"function sendHeartbeat(){"
-"if(ws&&ws.readyState===WebSocket.OPEN&&isController&&pageFocused&&!document.hidden)"
-"ws.send('HEARTBEAT');"
-"}"
-"setInterval(sendHeartbeat," STRINGIFY_VALUE(CONTROLLER_HEARTBEAT_MS) ");"
+"window.addEventListener('pagehide',()=>{"
+"resetControls();sendSafeStop();releaseControl();"
+"if(ws&&ws.readyState===WebSocket.OPEN)ws.close();"
+"});"
 
 // Browser -> ESP32 @20 Hz
 "setInterval("
@@ -782,7 +739,7 @@ static const char index_html[] =
 "50"
 ");"
 
-"setControl(false);"
+"setActive(false);"
 "</script>"
 
 "</body>"
@@ -799,65 +756,24 @@ static void safe_command_locked(void)
 }
 
 /* All helpers ending in _locked require state_mux. */
-static void clear_controller_locked(void)
+static void clear_active_locked(void)
 {
-    controller_fd = -1;
-    controller_last_seen_us = 0;
+    active_fd = -1;
     safe_command_locked();
-    control_dirty = true;
+    active_dirty = true;
 }
 
-static void expire_controller_locked(int64_t now)
-{
-    if (controller_fd >= 0 &&
-        now - controller_last_seen_us >= CONTROLLER_LEASE_TIMEOUT_MS * 1000LL) {
-        clear_controller_locked();
-        control_dirty = true;
-        lease_expired_log = true;
-    }
-}
-
-/* Independent of blocked HTTP sends/receives. No network or logging in timer task. */
-static void lease_timer_callback(void *arg)
-{
-    (void)arg;
-    portENTER_CRITICAL(&state_mux);
-    expire_controller_locked(esp_timer_get_time());
-    portEXIT_CRITICAL(&state_mux);
-}
-
-static void release_controller(int fd)
+static void release_active(int fd)
 {
     portENTER_CRITICAL(&state_mux);
-    const bool released = controller_fd >= 0 && controller_fd == fd;
+    const bool released = active_fd == fd;
     if (released) {
-        clear_controller_locked();
+        clear_active_locked();
     }
     portEXIT_CRITICAL(&state_mux);
     if (released) {
         ESP_LOGI(TAG, "Controle liberado fd=%d", fd);
     }
-}
-
-/* HTTP task only: session lookups must be serialized with HTTPD session cleanup. */
-static bool controller_is_valid(void)
-{
-    portENTER_CRITICAL(&state_mux);
-    expire_controller_locked(esp_timer_get_time());
-    const int fd = controller_fd;
-    portEXIT_CRITICAL(&state_mux);
-    if (fd < 0) {
-        return false;
-    }
-    if (httpd_ws_get_fd_info(server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
-        release_controller(fd);
-        return false;
-    }
-    portENTER_CRITICAL(&state_mux);
-    expire_controller_locked(esp_timer_get_time());
-    const bool valid = controller_fd == fd;
-    portEXIT_CRITICAL(&state_mux);
-    return valid;
 }
 
 static web_tx_t *find_tx(int fd)
@@ -873,7 +789,7 @@ static web_tx_t *find_tx(int fd)
 static void session_close(httpd_handle_t handle, int fd)
 {
     (void)handle;
-    release_controller(fd);
+    release_active(fd);
     web_tx_t *tx = find_tx(fd);
     if (tx != NULL) {
         memset(tx, 0, sizeof(*tx));
@@ -885,7 +801,7 @@ static void fail_tx(web_tx_t *tx)
 {
     if (!tx->failed) {
         tx->failed = true;
-        release_controller(tx->fd);
+        release_active(tx->fd);
         shutdown(tx->fd, SHUT_RDWR); /* HTTPD owns deletion and descriptor reuse. */
     }
 }
@@ -920,8 +836,8 @@ static bool flush_tx(web_tx_t *tx)
         fail_tx(tx);
         return false;
     }
-    /* Congestion/resource pressure is not proof that the controller died.
-     * Lease, RX errors and TCP keepalive still detect a lost peer. */
+    /* Congestion/resource pressure is not proof that the client died.
+     * RX errors and TCP keepalive still detect a lost peer. */
     if (tx->failures < UINT32_MAX) {
         ++tx->failures;
     }
@@ -979,7 +895,7 @@ static esp_err_t init_tx(int fd)
 static bool send_text(int fd, const char *text)
 {
     if (httpd_ws_get_fd_info(server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
-        release_controller(fd);
+        release_active(fd);
         return false;
     }
     web_tx_t *tx = find_tx(fd);
@@ -998,8 +914,8 @@ static bool send_text(int fd, const char *text)
     return httpd_ws_send_frame_async(server, fd, &frame) == ESP_OK;
 }
 
-/* HTTP task only. Status is personalized: controller=true only for its owner. */
-static void broadcast_control(void)
+/* HTTP task only. Status is personalized for every connected WebSocket. */
+static void broadcast_active(void)
 {
     int clients[WEB_MAX_CLIENTS];
     size_t count = WEB_MAX_CLIENTS;
@@ -1007,7 +923,7 @@ static void broadcast_control(void)
         return;
     }
     portENTER_CRITICAL(&state_mux);
-    control_dirty = false;
+    active_dirty = false;
     portEXIT_CRITICAL(&state_mux);
     for (size_t i = 0; i < count; ++i) {
         const int fd = clients[i];
@@ -1015,15 +931,15 @@ static void broadcast_control(void)
             continue;
         }
         portENTER_CRITICAL(&state_mux);
-        const int owner = controller_fd;
+        const int owner = active_fd;
         portEXIT_CRITICAL(&state_mux);
-        char json[96];
+        char json[48];
         snprintf(json, sizeof(json),
-                 "{\"type\":\"control\",\"controller\":%s,\"occupied\":%s}",
-                 owner == fd ? "true" : "false", owner >= 0 ? "true" : "false");
+                 "{\"type\":\"active\",\"active\":%s}",
+                 owner == fd ? "true" : "false");
         if (!send_text(fd, json)) {
             portENTER_CRITICAL(&state_mux);
-            control_dirty = true; /* Retry control status; telemetry is disposable. */
+            active_dirty = true; /* Retry active status; telemetry is disposable. */
             portEXIT_CRITICAL(&state_mux);
         }
     }
@@ -1052,10 +968,8 @@ static void process_command(int fd, const char *payload)
     vy = fmaxf(-3.0f, fminf(3.0f, vy));
     omega = fmaxf(-15.0f, fminf(15.0f, omega));
     portENTER_CRITICAL(&state_mux);
-    const int64_t now = esp_timer_get_time();
-    expire_controller_locked(now);
-    if (controller_fd == fd) {
-        controller_last_seen_us = now;
+    if (active_fd == fd) {
+        const int64_t now = esp_timer_get_time();
         command_vx = vx;
         command_vy = vy;
         command_omega = omega;
@@ -1080,7 +994,7 @@ static esp_err_t websocket_handler(httpd_req_t *req)
         /* HTTPD completes the upgrade after this handler returns. The next queued
          * broadcast discovers the new session, without retaining its descriptor. */
         portENTER_CRITICAL(&state_mux);
-        control_dirty = true;
+        active_dirty = true;
         portEXIT_CRITICAL(&state_mux);
         ESP_LOGI(TAG, "WS conectado fd=%d", fd);
         return ESP_OK;
@@ -1088,12 +1002,12 @@ static esp_err_t websocket_handler(httpd_req_t *req)
     httpd_ws_frame_t frame = {0};
     esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
     if (err != ESP_OK) {
-        release_controller(fd);
+        release_active(fd);
         return err;
     }
     char payload[128];
     if (frame.len >= sizeof(payload)) {
-        release_controller(fd);
+        release_active(fd);
         return ESP_ERR_INVALID_SIZE;
     }
     frame.payload = (uint8_t *)payload;
@@ -1101,13 +1015,13 @@ static esp_err_t websocket_handler(httpd_req_t *req)
     if (frame.len > 0) {
         err = httpd_ws_recv_frame(req, &frame, sizeof(payload) - 1);
         if (err != ESP_OK) {
-            release_controller(fd);
+            release_active(fd);
             return err;
         }
     }
     if (frame.type == HTTPD_WS_TYPE_CLOSE) {
-        release_controller(fd);
-        broadcast_control();
+        release_active(fd);
+        broadcast_active();
         return ESP_OK;
     }
     if (frame.type != HTTPD_WS_TYPE_TEXT || !frame.final ||
@@ -1115,36 +1029,30 @@ static esp_err_t websocket_handler(httpd_req_t *req)
         return ESP_OK;
     }
     payload[frame.len] = '\0';
-    if (strcmp(payload, "CLAIM_CONTROL") == 0) {
-        ESP_LOGI(TAG, "fd=%d solicitou controle", fd);
-        (void)controller_is_valid();
+    if (strcmp(payload, "TAKE_CONTROL") == 0) {
         portENTER_CRITICAL(&state_mux);
-        const int64_t now = esp_timer_get_time();
-        expire_controller_locked(now);
-        if (controller_fd == -1) {
+        const int previous_fd = active_fd;
+        if (previous_fd != fd) {
             safe_command_locked();
-            controller_fd = fd;
-            control_dirty = true;
-        }
-        const bool granted = controller_fd == fd;
-        if (granted) {
-            controller_last_seen_us = now;
+            active_fd = fd;
+            active_dirty = true;
         }
         portEXIT_CRITICAL(&state_mux);
-        ESP_LOGI(TAG, "fd=%d %s", fd,
-                 granted ? "agora e CONTROLADOR" : "claim negado, controller ativo");
-        broadcast_control();
+        if (previous_fd < 0) {
+            ESP_LOGI(TAG, "fd=%d assumiu controle", fd);
+        } else if (previous_fd != fd) {
+            ESP_LOGI(TAG, "controle transferido fd=%d -> fd=%d", previous_fd, fd);
+        }
+        broadcast_active();
     } else if (strcmp(payload, "RELEASE_CONTROL") == 0) {
-        release_controller(fd);
-        broadcast_control();
-    } else if (strcmp(payload, "HEARTBEAT") == 0) {
+        release_active(fd);
+        broadcast_active();
+    } else if (strcmp(payload, "EMERGENCY_STOP") == 0) {
         portENTER_CRITICAL(&state_mux);
-        const int64_t now = esp_timer_get_time();
-        expire_controller_locked(now);
-        if (controller_fd == fd) {
-            controller_last_seen_us = now;
-        }
+        clear_active_locked();
         portEXIT_CRITICAL(&state_mux);
+        ESP_LOGW(TAG, "parada de emergencia fd=%d", fd);
+        broadcast_active();
     } else {
         process_command(fd, payload);
     }
@@ -1158,10 +1066,11 @@ void web_server_get_command(web_command_t *command)
     }
     portENTER_CRITICAL(&state_mux);
     const int64_t now = esp_timer_get_time();
-    expire_controller_locked(now);
-    const int64_t age = last_command_us > 0 ? (now - last_command_us) / 1000 : INT64_MAX;
+    const int64_t elapsed_us = last_command_us > 0 ? now - last_command_us : INT64_MAX;
+    const int64_t age = elapsed_us == INT64_MAX ? INT64_MAX : elapsed_us / 1000;
     command->age_ms = age >= UINT32_MAX ? UINT32_MAX : (uint32_t)age;
-    command->connected = controller_fd >= 0 && age <= WEB_COMMAND_TIMEOUT_MS;
+    command->connected = active_fd >= 0 &&
+                         elapsed_us <= WEB_COMMAND_TIMEOUT_MS * 1000LL;
     if (!command->connected) {
         safe_command_locked();
     }
@@ -1193,13 +1102,12 @@ static void broadcast_work(void *arg)
             (void)flush_tx(&client_tx[i]);
         }
     }
-    (void)controller_is_valid();
     portENTER_CRITICAL(&state_mux);
-    const bool dirty = control_dirty;
+    const bool dirty = active_dirty;
     const quadmd_telemetry_t t = telemetry_snapshot;
     portEXIT_CRITICAL(&state_mux);
     if (dirty) {
-        broadcast_control();
+        broadcast_active();
     }
     char json[384];
     const int len = snprintf(json, sizeof(json),
@@ -1235,16 +1143,11 @@ static void telemetry_web_task(void *arg)
     for (;;) {
         vTaskDelay(period);
         portENTER_CRITICAL(&state_mux);
-        const bool expired = lease_expired_log;
-        lease_expired_log = false;
         const bool enqueue = !broadcast_pending;
         if (enqueue) {
             broadcast_pending = true;
         }
         portEXIT_CRITICAL(&state_mux);
-        if (expired) {
-            ESP_LOGI(TAG, "Controller lease expirou; controle liberado");
-        }
         /* At most one pending broadcast: slow clients cannot grow the work queue. */
         if (enqueue && httpd_queue_work(server, broadcast_work, NULL) != ESP_OK) {
             portENTER_CRITICAL(&state_mux);
@@ -1264,7 +1167,7 @@ esp_err_t web_server_start(void)
     config.close_fn = session_close;
     config.recv_wait_timeout = 1;
     config.send_wait_timeout = 1;
-    /* Do not evict the controller to make room for another HTTP connection. */
+    /* Keep persistent WebSocket sessions predictable under connection pressure. */
     config.lru_purge_enable = false;
     config.keep_alive_enable = true;
     config.keep_alive_idle = 5;
@@ -1286,29 +1189,11 @@ esp_err_t web_server_start(void)
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(server, &websocket_uri);
     }
-    const esp_timer_create_args_t timer_args = {
-        .callback = lease_timer_callback,
-        .name = "controller_lease",
-    };
-    if (err == ESP_OK) {
-        err = esp_timer_create(&timer_args, &lease_timer);
-    }
-    if (err == ESP_OK) {
-        err = esp_timer_start_periodic(
-            lease_timer,
-            CONTROLLER_LEASE_CHECK_PERIOD_US
-        );
-    }
     if (err == ESP_OK && xTaskCreatePinnedToCore(telemetry_web_task,
             "web_telemetry", 4096, NULL, 4, NULL, 0) != pdPASS) {
         err = ESP_ERR_NO_MEM;
     }
     if (err != ESP_OK) {
-        if (lease_timer != NULL) {
-            esp_timer_stop(lease_timer);
-            esp_timer_delete(lease_timer);
-            lease_timer = NULL;
-        }
         httpd_stop(server);
         server = NULL;
         return err;

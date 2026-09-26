@@ -21,7 +21,7 @@ typedef struct
 
     bool brake;
 
-    /* True only while the exclusive controller has a fresh valid command. */
+    /* True only while the active client has a fresh valid command. */
     bool connected;
 
     uint32_t age_ms;
@@ -30,8 +30,9 @@ typedef struct
 
 // ============================================================
 
-/* WS: CLAIM_CONTROL, RELEASE_CONTROL, HEARTBEAT, CMD,vx,vy,omega,kick,brake.
- * All clients receive telemetry and personalized type=control status. */
+/* WS: TAKE_CONTROL, RELEASE_CONTROL, EMERGENCY_STOP and
+ * CMD,vx,vy,omega,kick,brake. All clients receive telemetry and a
+ * personalized type=active status. */
 esp_err_t web_server_start(void);
 
 // ============================================================

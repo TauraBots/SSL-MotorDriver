@@ -39,13 +39,6 @@ static void mock_log(const char *tag, const char *format, ...) { (void)tag; (voi
 #define ESP_LOGW mock_log
 static int64_t mock_now = 100000;
 static int64_t esp_timer_get_time(void) { return mock_now; }
-typedef void *esp_timer_handle_t;
-typedef struct { void (*callback)(void *); const char *name; } esp_timer_create_args_t;
-static uint64_t timer_period;
-static esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *timer) { (void)args; *timer=(void *)1; return ESP_OK; }
-static esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period) { (void)timer; timer_period=period; return ESP_OK; }
-static esp_err_t esp_timer_stop(esp_timer_handle_t timer) { (void)timer; return ESP_OK; }
-static esp_err_t esp_timer_delete(esp_timer_handle_t timer) { (void)timer; return ESP_OK; }
 static void vTaskDelay(TickType_t t) { (void)t; }
 static int xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, int stack, void *arg, int priority, void *handle, int core) {
     (void)fn; (void)name; (void)stack; (void)arg; (void)priority; (void)handle; (void)core; return pdPASS;

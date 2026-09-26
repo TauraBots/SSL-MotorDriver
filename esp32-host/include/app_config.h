@@ -77,11 +77,6 @@
 
 #define WEB_COMMAND_TIMEOUT_MS 250
 
-// Controller ownership is independent of the motion watchdog.
-#define CONTROLLER_LEASE_TIMEOUT_MS 1500
-#define CONTROLLER_HEARTBEAT_MS 100
-#define CONTROLLER_LEASE_CHECK_PERIOD_US 50000
-
 // Allow Wi-Fi retransmissions without relaxing the movement watchdog above.
 #define WEB_SOCKET_SEND_TIMEOUT_MS 250
 

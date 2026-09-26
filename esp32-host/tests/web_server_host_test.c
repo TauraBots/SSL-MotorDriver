@@ -1,4 +1,4 @@
-﻿/* Appended after the real firmware source by run_web_server_host_tests.py. */
+/* Appended after the real firmware source by run_web_server_host_tests.py. */
 static void message(int fd, const char *input)
 {
     httpd_req_t req = {.fd=fd, .input=input};
@@ -19,26 +19,49 @@ static void assert_safe(void)
 int main(void)
 {
     assert(web_server_start()==ESP_OK);
-    assert(timer_period==CONTROLLER_LEASE_CHECK_PERIOD_US);
     connect_peer(10); connect_peer(11);
-    assert(controller_fd==-1); /* Handshake never grants control. */
-    message(10,"CLAIM_CONTROL"); message(11,"CLAIM_CONTROL");
-    assert(controller_fd==10);
-    peers[10].used=peers[11].used=0;
-    peers[10].blocked=1;
-    assert(send_text(10,"first")); /* Accepted into bounded queue despite EAGAIN. */
-    assert(peers[10].closes==0 && controller_fd==10);
-    assert(peers[10].info==HTTPD_WS_CLIENT_WEBSOCKET);
+    assert(active_fd==-1); /* Connecting only observes telemetry. */
+
+    message(10,"TAKE_CONTROL");
+    assert(active_fd==10);
+    message(10,"CMD,1,0,0,50,0");
+    message(10,"CMD,1,0,0,0,0");
+    web_command_t c;
+    web_server_get_command(&c);
+    assert(c.connected && c.vx==1 && c.kick_power==50);
+    web_server_get_command(&c); assert(c.kick_power==0);
+
+    message(11,"CMD,2,1,1,80,0");
+    web_server_get_command(&c);
+    assert(c.vx==1 && c.vy==0 && c.omega==0 && c.kick_power==0);
+
+    message(11,"TAKE_CONTROL");
+    assert(active_fd==11); assert_safe(); /* Safe stop precedes takeover. */
+    message(11,"CMD,2,1,1,80,0");
+    web_server_get_command(&c);
+    assert(c.connected && c.vx==2 && c.vy==1 && c.omega==1 && c.kick_power==80);
+    message(10,"CMD,-1,-1,-1,10,0");
+    web_server_get_command(&c); assert(c.vx==2 && c.vy==1 && c.omega==1);
+
+    message(10,"RELEASE_CONTROL"); assert(active_fd==11);
+    message(11,"RELEASE_CONTROL"); assert(active_fd==-1); assert_safe();
+
+    message(10,"TAKE_CONTROL");
+    message(10,"CMD,1,0,0,0,0");
+    mock_now+=WEB_COMMAND_TIMEOUT_MS*1000LL+1;
+    assert_safe();
+    assert(active_fd==10); /* Motion timeout does not change the active client. */
+
+    message(11,"EMERGENCY_STOP");
+    assert(active_fd==-1); assert_safe();
+
+    /* Preserve partial TX bytes and isolate a congested peer. */
+    message(10,"TAKE_CONTROL");
+    peers[10].used=peers[11].used=0; peers[10].blocked=1;
+    assert(send_text(10,"first"));
+    assert(peers[10].closes==0 && active_fd==10);
     assert(!send_text(10,"dropped"));
-    assert(send_text(11,"spectator"));
-    assert(peers[11].used>0); /* Slow controller cannot stop spectator telemetry. */
-    mock_now+=100000;
-    message(10,"HEARTBEAT");
-    assert(controller_last_seen_us==mock_now && controller_fd==10);
-    const int64_t owner_seen=controller_last_seen_us;
-    message(11,"HEARTBEAT"); message(11,"CMD,1,1,1,50,0");
-    assert(controller_last_seen_us==owner_seen);
-    // Recover with partial writes, including an interleaved protocol PONG.
+    assert(send_text(11,"observer")); assert(peers[11].used>0);
     peers[10].blocked=0; peers[10].limit=1;
     httpd_ws_frame_t pong={.type=HTTPD_WS_TYPE_PONG,.payload=(uint8_t *)"x",.len=1};
     assert(httpd_ws_send_frame_async(server,10,&pong)==ESP_OK);
@@ -46,33 +69,24 @@ int main(void)
     const unsigned char expected[]={0x81,5,'f','i','r','s','t',0x8a,1,'x'};
     assert(peers[10].used==sizeof(expected));
     assert(memcmp(peers[10].wire,expected,sizeof(expected))==0);
-    assert(find_tx(10)->failures==0 && peers[10].closes==0);
-    peers[10].limit=0;
-    message(10,"CMD,1,0,0,50,0");
-    message(10,"CMD,1,0,0,0,0");
-    web_command_t c;
-    web_server_get_command(&c); assert(c.kick_power==50 && c.vx==1);
-    web_server_get_command(&c); assert(c.kick_power==0);
-    mock_now+=300000; message(10,"HEARTBEAT");
-    assert_safe(); assert(controller_fd==10); /* Heartbeat cannot refresh motion. */
-    message(11,"RELEASE_CONTROL"); assert(controller_fd==10);
-    control_dirty=false;
-    mock_now+=CONTROLLER_LEASE_TIMEOUT_MS*1000LL;
-    lease_timer_callback(NULL);
-    assert(controller_fd==-1 && control_dirty); assert_safe();
-    message(10,"HEARTBEAT"); assert(controller_fd==-1); /* No resurrection. */
-    message(11,"CLAIM_CONTROL"); assert(controller_fd==11);
-    // Real socket death does release ownership immediately.
-    peers[11].fatal=ECONNRESET;
-    (void)send_text(11,"dead");
-    assert(peers[11].closes==1 && controller_fd==-1); assert_safe();
-    session_close(server,11); assert(find_tx(11)==NULL);
-    peers[11].fatal=0;
-    connect_peer(11); assert(find_tx(11)->length==0); /* fd reuse is clean. */
-    message(11,"CLAIM_CONTROL");
-    peers[11].info=HTTPD_WS_CLIENT_INVALID;
-    assert(!controller_is_valid() && controller_fd==-1);
+
+    /* A dead or closed active socket releases control; descriptor reuse is clean. */
+    peers[10].fatal=ECONNRESET; peers[10].limit=0;
+    (void)send_text(10,"dead");
+    assert(peers[10].closes==1 && active_fd==-1); assert_safe();
+    session_close(server,10); assert(find_tx(10)==NULL);
+    peers[10].fatal=0; connect_peer(10);
+    assert(find_tx(10)->length==0 && active_fd==-1);
+    message(10,"TAKE_CONTROL");
+    session_close(server,10);
+    assert(active_fd==-1); assert_safe();
+
+    /* Telemetry broadcast remains multi-client. */
+    connect_peer(12);
+    peers[11].used=peers[12].used=0;
+    broadcast_work(NULL);
+    assert(peers[11].used>0 && peers[12].used>0);
     assert(critical_depth==0);
-    puts("PASS: transient TX, partial frames/PONG ordering, peer isolation, fd reuse, lease, watchdog, heartbeat, kick");
+    puts("PASS: active_fd takeover/release, global stop, watchdog, TX isolation, telemetry, disconnect");
     return 0;
 }
