@@ -25,3 +25,7 @@ int quadmd_uart_read(
     size_t length,
     uint32_t timeout_ms
 );
+
+// ============================================================
+
+uint32_t quadmd_uart_get_error_count(void);

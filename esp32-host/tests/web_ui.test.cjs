@@ -5,7 +5,8 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const html = fs.readFileSync('web/index.html', 'utf8');
-const script = fs.readFileSync('web/app.js', 'utf8');
+const script = fs.readFileSync('web/app.js', 'utf8')
+    .replace('const DEBUG = false;', 'const DEBUG = true;');
 const style = fs.readFileSync('web/style.css', 'utf8');
 const elements = new Map();
 

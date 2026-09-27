@@ -7,12 +7,15 @@
 #define TAURA_PROFILE_SAFE_9600  0
 #define TAURA_PROFILE_HIGH_RATE  1
 #define TAURA_PROFILE_CUSTOM     2
+#define TAURA_PROFILE_VALIDATION_120 3
 
 // ============================================================
 // PERFIL ATUAL
 // ============================================================
 
-#define TAURA_PROFILE TAURA_PROFILE_CUSTOM
+#ifndef TAURA_PROFILE
+#define TAURA_PROFILE TAURA_PROFILE_SAFE_9600
+#endif
 
 // ============================================================
 // ROBÔ
@@ -65,6 +68,20 @@
 #define QUADMD_TELEMETRY_FULL_HZ 10
 #define WEB_TELEMETRY_HZ 60
 
+// ============================================================
+// VALIDATION 120
+// Perfil experimental para ensaios de validacao cinematica.
+// ============================================================
+
+#elif TAURA_PROFILE == TAURA_PROFILE_VALIDATION_120
+
+#define QUADMD_UART_BAUD 921600
+#define QUADMD_COMMAND_HZ 120
+#define QUADMD_SPLIT_TELEMETRY 1
+#define QUADMD_TELEMETRY_FAST_HZ 120
+#define QUADMD_TELEMETRY_FULL_HZ 10
+#define WEB_TELEMETRY_HZ 120
+
 #else
 
 #error "TAURA_PROFILE invalido"
@@ -94,3 +111,8 @@
 // ============================================================
 
 #define HZ_TO_US(hz) (1000000LL / (hz))
+
+// Logs por frame introduzem jitter significativo no perfil de 120 Hz.
+#ifndef WEB_TELEMETRY_DEBUG
+#define WEB_TELEMETRY_DEBUG 0
+#endif

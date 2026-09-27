@@ -16,6 +16,11 @@
 
 // ============================================================
 
+static uint32_t uart_error_count;
+static portMUX_TYPE uart_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// ============================================================
+
 esp_err_t quadmd_uart_init(void)
 {
     const uart_config_t config =
@@ -110,11 +115,18 @@ int quadmd_uart_write(
         return 0;
     }
 
-    return uart_write_bytes(
+    const int written = uart_write_bytes(
         QUADMD_UART,
         data,
         length
     );
+    if (written != (int)length)
+    {
+        portENTER_CRITICAL(&uart_stats_mux);
+        uart_error_count++;
+        portEXIT_CRITICAL(&uart_stats_mux);
+    }
+    return written;
 }
 
 // ============================================================
@@ -132,7 +144,7 @@ int quadmd_uart_read(
         return 0;
     }
 
-    return uart_read_bytes(
+    const int received = uart_read_bytes(
         QUADMD_UART,
         data,
         length,
@@ -140,4 +152,21 @@ int quadmd_uart_read(
             timeout_ms
         )
     );
+    if (received < 0)
+    {
+        portENTER_CRITICAL(&uart_stats_mux);
+        uart_error_count++;
+        portEXIT_CRITICAL(&uart_stats_mux);
+    }
+    return received;
+}
+
+// ============================================================
+
+uint32_t quadmd_uart_get_error_count(void)
+{
+    portENTER_CRITICAL(&uart_stats_mux);
+    const uint32_t errors = uart_error_count;
+    portEXIT_CRITICAL(&uart_stats_mux);
+    return errors;
 }

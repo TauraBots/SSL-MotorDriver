@@ -91,7 +91,13 @@ int main(void)
         .communication_ok=true, .watchdog_ok=true, .fault_status=0,
         .last_command_sequence=42,
     };
-    web_server_update_telemetry(&telemetry);
+    web_command_t sent_command = {
+        .vx=0.5f, .vy=0.0f, .omega=0.25f, .kick_power=7, .brake=false,
+    };
+    web_server_update_sent_command(&sent_command, 4890, 123450000);
+    web_server_update_telemetry(&telemetry, 123456789);
+    web_server_stats_t stats_before;
+    web_server_get_stats(&stats_before);
     peers[11].used=peers[12].used=0;
     message(11,"TAKE_CONTROL");
     broadcast_work(NULL);
@@ -100,6 +106,16 @@ int main(void)
     assert(wire_contains(12, "\"type\":\"telemetry\""));
     assert(wire_contains(11, "\"battery\":11.835"));
     assert(wire_contains(12, "\"rssi\":-61"));
+    assert(wire_contains(11, "\"esp_rx_time_us\":123456789"));
+    assert(wire_contains(11, "\"quadmd_time_ms\":"));
+    assert(wire_contains(11, "\"request_sequence\":"));
+    assert(wire_contains(11, "\"command_time_us\":123450000"));
+    assert(wire_contains(11, "\"command\":{\"vx\":0.500"));
+    assert(wire_contains(11, "\"motor_cmd\":["));
+    web_server_stats_t stats;
+    web_server_get_stats(&stats);
+    assert(stats.telemetry_frames==stats_before.telemetry_frames+2);
+    assert(stats.telemetry_dropped==0);
     assert(active_fd==11); /* The observer receives telemetry without taking control. */
     assert(critical_depth==0);
     puts("PASS: active_fd takeover/release, global stop, watchdog, TX isolation, telemetry, disconnect");

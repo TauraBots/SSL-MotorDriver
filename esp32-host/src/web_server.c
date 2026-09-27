@@ -1,5 +1,6 @@
 #include "web_server.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,8 +25,22 @@ static bool command_brake = true;
 static int64_t last_command_us;
 static int active_fd = -1;
 static quadmd_telemetry_t telemetry_snapshot;
+static int64_t telemetry_rx_time_us;
 static bool active_dirty = true;
 static bool broadcast_pending;
+static web_server_stats_t web_stats;
+static esp_timer_handle_t telemetry_timer;
+
+typedef struct {
+    float vx;
+    float vy;
+    float omega;
+    uint8_t kick_power;
+    bool brake;
+    uint32_t sequence;
+    int64_t esp_tx_time_us;
+} last_sent_command_t;
+static last_sent_command_t last_sent_command = { .brake = true };
 /* Immutable after startup; all WebSocket sends run on the HTTP task. */
 static httpd_handle_t server;
 
@@ -93,7 +108,9 @@ static bool send_text(int fd, const char *text)
         .payload = (uint8_t *)text,
         .len = len,
     };
+#if WEB_TELEMETRY_DEBUG
     ESP_LOGI(TAG, "WS TX fd=%d payload=%s", fd, text);
+#endif
     const esp_err_t err = httpd_ws_send_frame_async(server, fd, &frame);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WS TX falhou fd=%d err=0x%x", fd, (unsigned int)err);
@@ -311,13 +328,45 @@ void web_server_get_command(web_command_t *command)
     portEXIT_CRITICAL(&state_mux);
 }
 
-void web_server_update_telemetry(const quadmd_telemetry_t *telemetry)
+void web_server_update_telemetry(const quadmd_telemetry_t *telemetry,
+                                 int64_t esp_rx_time_us)
 {
     if (telemetry == NULL) {
         return;
     }
     portENTER_CRITICAL(&state_mux);
     telemetry_snapshot = *telemetry;
+    telemetry_rx_time_us = esp_rx_time_us;
+    portEXIT_CRITICAL(&state_mux);
+}
+
+void web_server_update_sent_command(const web_command_t *command,
+                                    uint32_t sequence,
+                                    int64_t esp_tx_time_us)
+{
+    if (command == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&state_mux);
+    last_sent_command = (last_sent_command_t){
+        .vx = command->vx,
+        .vy = command->vy,
+        .omega = command->omega,
+        .kick_power = command->kick_power,
+        .brake = command->brake,
+        .sequence = sequence,
+        .esp_tx_time_us = esp_tx_time_us,
+    };
+    portEXIT_CRITICAL(&state_mux);
+}
+
+void web_server_get_stats(web_server_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&state_mux);
+    *stats = web_stats;
     portEXIT_CRITICAL(&state_mux);
 }
 
@@ -328,31 +377,50 @@ static void broadcast_work(void *arg)
     portENTER_CRITICAL(&state_mux);
     const bool dirty = active_dirty;
     const quadmd_telemetry_t t = telemetry_snapshot;
+    const int64_t rx_time_us = telemetry_rx_time_us;
+    const last_sent_command_t command = last_sent_command;
     portEXIT_CRITICAL(&state_mux);
     if (dirty) {
         broadcast_active();
     }
     wifi_status_t wifi = { .rssi = -127 };
     (void)wifi_sta_get_status(&wifi);
-    char json[448];
+    char json[768];
     const int len = snprintf(json, sizeof(json),
-        "{\"type\":\"telemetry\",\"valid\":%s,\"battery\":%.3f,"
-        "\"rpm\":[%.1f,%.1f,%.1f,%.1f],\"cmd\":[%d,%d,%d,%d],"
+        "{\"type\":\"telemetry\",\"valid\":%s,"
+        "\"esp_rx_time_us\":%" PRId64 ",\"quadmd_time_ms\":%lu,"
+        "\"request_sequence\":%u,\"last_command_sequence\":%lu,"
+        "\"command_time_us\":%" PRId64 ",\"command_sequence\":%lu,"
+        "\"command\":{\"vx\":%.3f,\"vy\":%.3f,\"omega\":%.3f,"
+        "\"kick\":%u,\"brake\":%s},\"battery\":%.3f,"
+        "\"rpm\":[%.1f,%.1f,%.1f,%.1f],"
+        "\"motor_cmd\":[%d,%d,%d,%d],\"cmd\":[%d,%d,%d,%d],"
         "\"comm\":%s,\"watchdog\":%s,\"fault\":%u,\"sequence\":%lu,"
         "\"wifi_connected\":%s,\"rssi\":%d}",
-        t.valid ? "true" : "false", t.battery_voltage,
+        t.valid ? "true" : "false", rx_time_us, (unsigned long)t.time_ms,
+        (unsigned int)t.request_sequence, (unsigned long)t.last_command_sequence,
+        command.esp_tx_time_us, (unsigned long)command.sequence,
+        command.vx, command.vy, command.omega,
+        (unsigned int)command.kick_power, command.brake ? "true" : "false",
+        t.battery_voltage,
         t.rpm[0], t.rpm[1], t.rpm[2], t.rpm[3],
+        t.motor_command[0], t.motor_command[1], t.motor_command[2], t.motor_command[3],
         t.motor_command[0], t.motor_command[1], t.motor_command[2], t.motor_command[3],
         t.communication_ok ? "true" : "false", t.watchdog_ok ? "true" : "false",
         (unsigned int)t.fault_status, (unsigned long)t.last_command_sequence,
         wifi.connected ? "true" : "false", wifi.rssi);
     int clients[WEB_MAX_CLIENTS];
     size_t count = WEB_MAX_CLIENTS;
+#if WEB_TELEMETRY_DEBUG
     if (len > 0 && len < (int)sizeof(json)) {
         ESP_LOGI(TAG, "Telemetry JSON: %s", json);
     }
-    if (len > 0 && len < (int)sizeof(json) &&
-        httpd_get_client_list(server, &count, clients) == ESP_OK) {
+#endif
+    const bool json_valid = len > 0 && len < (int)sizeof(json);
+    const esp_err_t list_err = json_valid
+        ? httpd_get_client_list(server, &count, clients)
+        : ESP_FAIL;
+    if (json_valid && list_err == ESP_OK) {
         int websocket_clients[WEB_MAX_CLIENTS];
         size_t websocket_count = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -368,39 +436,49 @@ static void broadcast_work(void *arg)
             }
         }
         if (websocket_count > 0) {
+#if WEB_TELEMETRY_DEBUG
             ESP_LOGI(TAG, "Broadcast telemetry to %d clients",
                      (int)websocket_count);
+#endif
             for (size_t i = 0; i < websocket_count; ++i) {
-                (void)send_text(websocket_clients[i], json);
+                const bool sent = send_text(websocket_clients[i], json);
+                portENTER_CRITICAL(&state_mux);
+                if (sent) {
+                    web_stats.telemetry_frames++;
+                } else {
+                    web_stats.telemetry_dropped++;
+                }
+                portEXIT_CRITICAL(&state_mux);
             }
         }
+    } else {
+        portENTER_CRITICAL(&state_mux);
+        web_stats.telemetry_dropped++;
+        portEXIT_CRITICAL(&state_mux);
     }
     portENTER_CRITICAL(&state_mux);
     broadcast_pending = false;
     portEXIT_CRITICAL(&state_mux);
 }
 
-static void telemetry_web_task(void *arg)
+static void telemetry_timer_callback(void *arg)
 {
     (void)arg;
-    TickType_t period = pdMS_TO_TICKS(1000 / WEB_TELEMETRY_HZ);
-    if (period == 0) {
-        period = 1;
+    portENTER_CRITICAL(&state_mux);
+    const bool enqueue = !broadcast_pending;
+    if (enqueue) {
+        broadcast_pending = true;
+    } else {
+        web_stats.telemetry_dropped++;
     }
-    for (;;) {
-        vTaskDelay(period);
+    portEXIT_CRITICAL(&state_mux);
+
+    /* At most one pending broadcast: telemetry is best effort. */
+    if (enqueue && httpd_queue_work(server, broadcast_work, NULL) != ESP_OK) {
         portENTER_CRITICAL(&state_mux);
-        const bool enqueue = !broadcast_pending;
-        if (enqueue) {
-            broadcast_pending = true;
-        }
+        broadcast_pending = false;
+        web_stats.telemetry_dropped++;
         portEXIT_CRITICAL(&state_mux);
-        /* At most one pending broadcast: slow clients cannot grow the work queue. */
-        if (enqueue && httpd_queue_work(server, broadcast_work, NULL) != ESP_OK) {
-            portENTER_CRITICAL(&state_mux);
-            broadcast_pending = false;
-            portEXIT_CRITICAL(&state_mux);
-        }
     }
 }
 
@@ -448,11 +526,23 @@ esp_err_t web_server_start(void)
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(server, &websocket_uri);
     }
-    if (err == ESP_OK && xTaskCreatePinnedToCore(telemetry_web_task,
-            "web_telemetry", 4096, NULL, 4, NULL, 0) != pdPASS) {
-        err = ESP_ERR_NO_MEM;
+    if (err == ESP_OK) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = telemetry_timer_callback,
+            .name = "web_telemetry",
+        };
+        err = esp_timer_create(&timer_args, &telemetry_timer);
+    }
+    if (err == ESP_OK) {
+        err = esp_timer_start_periodic(telemetry_timer,
+                                       HZ_TO_US(WEB_TELEMETRY_HZ));
     }
     if (err != ESP_OK) {
+        if (telemetry_timer != NULL) {
+            (void)esp_timer_stop(telemetry_timer);
+            (void)esp_timer_delete(telemetry_timer);
+            telemetry_timer = NULL;
+        }
         httpd_stop(server);
         server = NULL;
         return err;

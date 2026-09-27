@@ -8,6 +8,7 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
 
@@ -49,10 +50,12 @@ typedef struct { bool connected; int rssi; uint8_t channel; } wifi_status_t;
 static bool wifi_sta_get_status(wifi_status_t *status) {
     *status=(wifi_status_t){.connected=true,.rssi=-61,.channel=6}; return true;
 }
-static void vTaskDelay(TickType_t t) { (void)t; }
-static int xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, int stack, void *arg, int priority, void *handle, int core) {
-    (void)fn; (void)name; (void)stack; (void)arg; (void)priority; (void)handle; (void)core; return pdPASS;
-}
+typedef void *esp_timer_handle_t;
+typedef struct { void (*callback)(void *); const char *name; } esp_timer_create_args_t;
+static esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *timer) { (void)args; *timer=(void *)2; return ESP_OK; }
+static esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period) { (void)timer; assert(period>0); return ESP_OK; }
+static esp_err_t esp_timer_stop(esp_timer_handle_t timer) { (void)timer; return ESP_OK; }
+static esp_err_t esp_timer_delete(esp_timer_handle_t timer) { (void)timer; return ESP_OK; }
 typedef void *httpd_handle_t;
 typedef enum { HTTPD_WS_CLIENT_INVALID, HTTPD_WS_CLIENT_HTTP, HTTPD_WS_CLIENT_WEBSOCKET } httpd_ws_client_info_t;
 typedef struct { int type; uint8_t *payload; size_t len; bool final; } httpd_ws_frame_t;

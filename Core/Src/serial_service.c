@@ -2,6 +2,7 @@
 
 #include "app_c_api.h"
 #include "robot_identity.h"
+#include "serial_profile.h"
 #include "serial_protocol.h"
 #include <stdio.h>
 #include <string.h>
@@ -42,8 +43,8 @@
 #define TELEMETRY_FLAG_BATTERY (1U << 2)
 #define TELEMETRY_FLAG_DIAGNOSTICS (1U << 3)
 #define TELEMETRY_FLAG_FULL 0x0FU
-#define TELEMETRY_MIN_INTERVAL_MS 100U
-#define TELEMETRY_TURNAROUND_MS 3U
+#define TELEMETRY_MIN_INTERVAL_MS SERIAL_TELEMETRY_MIN_INTERVAL_MS
+#define TELEMETRY_TURNAROUND_MS SERIAL_TELEMETRY_TURNAROUND_MS
 #define ROBOT_ID_BROADCAST SERIAL_ROBOT_ID_BROADCAST
 #define ROBOT_CONFIG_KEY 0x46434449U
 #define ROBOT_UID_LEN ROBOT_IDENTITY_UID_LEN

@@ -71,6 +71,9 @@ static uint32_t
 static uint32_t
     telemetry_parser_errors = 0;
 
+static uint32_t
+    telemetry_rx_overflows = 0;
+
 // ============================================================
 // SEND VELOCITY
 // ============================================================
@@ -111,10 +114,22 @@ static void send_velocity(void)
         return;
     }
 
-    quadmd_uart_write(
+    const int64_t tx_time_us =
+        esp_timer_get_time();
+
+    const int written = quadmd_uart_write(
         frame,
         length
     );
+
+    if (written == (int)length)
+    {
+        web_server_update_sent_command(
+            &command,
+            command_sequence,
+            tx_time_us
+        );
+    }
 }
 
 // ============================================================
@@ -213,6 +228,16 @@ static void process_rx(void)
         if (received_size > available)
         {
             rx_length = 0;
+
+            portENTER_CRITICAL(
+                &telemetry_mux
+            );
+
+            telemetry_rx_overflows++;
+
+            portEXIT_CRITICAL(
+                &telemetry_mux
+            );
 
             available =
                 RX_BUFFER_SIZE;
@@ -350,6 +375,9 @@ static void process_rx(void)
 
         if (ok)
         {
+            const int64_t esp_rx_time_us =
+                esp_timer_get_time();
+
             portENTER_CRITICAL(
                 &telemetry_mux
             );
@@ -367,12 +395,21 @@ static void process_rx(void)
              * Copia snapshot para Web.
              */
             web_server_update_telemetry(
-                &parsed
+                &parsed,
+                esp_rx_time_us
             );
         }
         else
         {
+            portENTER_CRITICAL(
+                &telemetry_mux
+            );
+
             telemetry_parser_errors++;
+
+            portEXIT_CRITICAL(
+                &telemetry_mux
+            );
         }
 
         // ====================================================
@@ -545,6 +582,7 @@ static void monitor_task(
     (void)arg;
 
     uint32_t previous_packets = 0;
+    uint32_t previous_web_frames = 0;
 
     while (1)
     {
@@ -559,6 +597,8 @@ static void monitor_task(
         quadmd_telemetry_t t;
 
         uint32_t current_packets;
+        uint32_t parser_errors;
+        uint32_t rx_overflows;
 
         portENTER_CRITICAL(
             &telemetry_mux
@@ -569,6 +609,12 @@ static void monitor_task(
 
         current_packets =
             telemetry_packets;
+
+        parser_errors =
+            telemetry_parser_errors;
+
+        rx_overflows =
+            telemetry_rx_overflows;
 
         portEXIT_CRITICAL(
             &telemetry_mux
@@ -583,21 +629,53 @@ static void monitor_task(
         previous_packets =
             current_packets;
 
+        web_server_stats_t web_stats;
+
+        web_server_get_stats(
+            &web_stats
+        );
+
+        const uint32_t web_frequency =
+            web_stats.telemetry_frames -
+            previous_web_frames;
+
+        previous_web_frames =
+            web_stats.telemetry_frames;
+
+        const uint32_t uart_errors =
+            quadmd_uart_get_error_count() +
+            rx_overflows;
+
         // ====================================================
 
         ESP_LOGI(
             TAG,
 
-            "Telemetry: %lu Hz | "
+            "Telemetry RX: %lu Hz | "
+            "Web TX: %lu Hz | "
+            "Parser errors: %lu | "
+            "Dropped: %lu | "
+            "UART errors: %lu | "
             "Battery: %.3f V | "
             "RPM: %.1f %.1f %.1f %.1f | "
             "Comm: %u | "
             "Watchdog: %u | "
-            "Fault: 0x%02X | "
-            "Parser errors: %lu",
+            "Fault: 0x%02X",
 
             (unsigned long)
                 frequency,
+
+            (unsigned long)
+                web_frequency,
+
+            (unsigned long)
+                parser_errors,
+
+            (unsigned long)
+                web_stats.telemetry_dropped,
+
+            (unsigned long)
+                uart_errors,
 
             t.battery_voltage,
 
@@ -610,10 +688,7 @@ static void monitor_task(
 
             t.watchdog_ok,
 
-            t.fault_status,
-
-            (unsigned long)
-                telemetry_parser_errors
+            t.fault_status
         );
     }
 }

@@ -1,6 +1,6 @@
 'use strict';
 
-const DEBUG = true;
+const DEBUG = false;
 
 const UI = {
   connection: document.getElementById('connection'),
@@ -97,7 +97,7 @@ function connectWebSocket() {
   };
 
   socket.onmessage = event => {
-    console.log('[RX RAW]', event.data);
+    debugLog('[RX RAW]', event.data);
     let data;
     try {
       data = JSON.parse(event.data);
@@ -248,7 +248,7 @@ function setupJoystick(base, knob, callback, rotationOnly) {
       dx = dx / length * radius;
       dy = dy / length * radius;
     }
-    console.log('[JOYSTICK MOVE]', dx, dy);
+    debugLog('[JOYSTICK MOVE]', dx, dy);
     knob.style.transform = `translate(${dx}px,${dy}px)`;
     callback(dx / radius, -dy / radius);
   }
@@ -271,7 +271,7 @@ function setupJoystick(base, knob, callback, rotationOnly) {
     activePointerId = event.pointerId;
     activeJoystickPointers.set(event.pointerId, stop);
     base.setPointerCapture(event.pointerId);
-    console.log('[JOYSTICK DOWN]', event.clientX, event.clientY);
+    debugLog('[JOYSTICK DOWN]', event.clientX, event.clientY);
     update(event);
   });
   base.addEventListener('pointermove', update);

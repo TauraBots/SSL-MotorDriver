@@ -28,6 +28,12 @@ typedef struct
 
 } web_command_t;
 
+typedef struct
+{
+    uint32_t telemetry_frames;
+    uint32_t telemetry_dropped;
+} web_server_stats_t;
+
 // ============================================================
 
 /* WS: TAKE_CONTROL, RELEASE_CONTROL, EMERGENCY_STOP and
@@ -45,5 +51,18 @@ void web_server_get_command(
 // ============================================================
 
 void web_server_update_telemetry(
-    const quadmd_telemetry_t *telemetry
+    const quadmd_telemetry_t *telemetry,
+    int64_t esp_rx_time_us
+);
+
+// ============================================================
+
+void web_server_update_sent_command(
+    const web_command_t *command,
+    uint32_t sequence,
+    int64_t esp_tx_time_us
+);
+
+void web_server_get_stats(
+    web_server_stats_t *stats
 );
