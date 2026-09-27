@@ -582,7 +582,7 @@ static void monitor_task(
     (void)arg;
 
     uint32_t previous_packets = 0;
-    uint32_t previous_web_frames = 0;
+    uint32_t previous_web_broadcasts = 0;
 
     while (1)
     {
@@ -636,11 +636,11 @@ static void monitor_task(
         );
 
         const uint32_t web_frequency =
-            web_stats.telemetry_frames -
-            previous_web_frames;
+            web_stats.telemetry_broadcasts -
+            previous_web_broadcasts;
 
-        previous_web_frames =
-            web_stats.telemetry_frames;
+        previous_web_broadcasts =
+            web_stats.telemetry_broadcasts;
 
         const uint32_t uart_errors =
             quadmd_uart_get_error_count() +
