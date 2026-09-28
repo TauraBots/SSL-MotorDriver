@@ -14,7 +14,7 @@
 // ============================================================
 
 #ifndef TAURA_PROFILE
-#define TAURA_PROFILE TAURA_PROFILE_SAFE_9600
+#define TAURA_PROFILE TAURA_PROFILE_CUSTOM
 #endif
 
 // ============================================================

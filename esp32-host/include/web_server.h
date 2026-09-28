@@ -30,7 +30,8 @@ typedef struct
 
 typedef struct
 {
-    uint32_t telemetry_frames;
+    uint32_t telemetry_broadcasts;
+    uint32_t telemetry_client_frames;
     uint32_t telemetry_dropped;
 } web_server_stats_t;
 

@@ -23,5 +23,6 @@ source = build / 'test.c'
 source.write_text('\n'.join(parts), encoding='utf-8')
 exe = build / 'test.exe'
 cmd = [args.cc] + (['cc'] if args.zig else [])
-subprocess.run(cmd + ['-std=c11', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(exe)], cwd=root, check=True)
+subprocess.run(cmd + ['-std=c11', '-Wall', '-Wextra', '-Werror', str(source),
+                      '-o', str(exe), '-lm'], cwd=root, check=True)
 subprocess.run([str(exe)], cwd=root, check=True)

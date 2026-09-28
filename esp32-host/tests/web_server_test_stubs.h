@@ -11,6 +11,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <sys/types.h>
 
 static const unsigned char web_index_html[] = "<html>";
 static const unsigned char web_style_css[] = "body{}";

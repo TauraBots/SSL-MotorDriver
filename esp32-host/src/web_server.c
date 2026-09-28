@@ -26,6 +26,8 @@ static int64_t last_command_us;
 static int active_fd = -1;
 static quadmd_telemetry_t telemetry_snapshot;
 static int64_t telemetry_rx_time_us;
+static uint32_t telemetry_generation;
+static uint32_t last_broadcast_generation;
 static bool active_dirty = true;
 static bool broadcast_pending;
 static web_server_stats_t web_stats;
@@ -337,6 +339,7 @@ void web_server_update_telemetry(const quadmd_telemetry_t *telemetry,
     portENTER_CRITICAL(&state_mux);
     telemetry_snapshot = *telemetry;
     telemetry_rx_time_us = esp_rx_time_us;
+    telemetry_generation++;
     portEXIT_CRITICAL(&state_mux);
 }
 
@@ -379,14 +382,18 @@ static void broadcast_work(void *arg)
     const quadmd_telemetry_t t = telemetry_snapshot;
     const int64_t rx_time_us = telemetry_rx_time_us;
     const last_sent_command_t command = last_sent_command;
+    const uint32_t generation = telemetry_generation;
+    const bool telemetry_pending = generation != last_broadcast_generation;
     portEXIT_CRITICAL(&state_mux);
     if (dirty) {
         broadcast_active();
     }
-    wifi_status_t wifi = { .rssi = -127 };
-    (void)wifi_sta_get_status(&wifi);
     char json[768];
-    const int len = snprintf(json, sizeof(json),
+    int len = 0;
+    if (telemetry_pending) {
+        wifi_status_t wifi = { .rssi = -127 };
+        (void)wifi_sta_get_status(&wifi);
+        len = snprintf(json, sizeof(json),
         "{\"type\":\"telemetry\",\"valid\":%s,"
         "\"esp_rx_time_us\":%" PRId64 ",\"quadmd_time_ms\":%lu,"
         "\"request_sequence\":%u,\"last_command_sequence\":%lu,"
@@ -409,6 +416,7 @@ static void broadcast_work(void *arg)
         t.communication_ok ? "true" : "false", t.watchdog_ok ? "true" : "false",
         (unsigned int)t.fault_status, (unsigned long)t.last_command_sequence,
         wifi.connected ? "true" : "false", wifi.rssi);
+    }
     int clients[WEB_MAX_CLIENTS];
     size_t count = WEB_MAX_CLIENTS;
 #if WEB_TELEMETRY_DEBUG
@@ -416,11 +424,10 @@ static void broadcast_work(void *arg)
         ESP_LOGI(TAG, "Telemetry JSON: %s", json);
     }
 #endif
-    const bool json_valid = len > 0 && len < (int)sizeof(json);
-    const esp_err_t list_err = json_valid
-        ? httpd_get_client_list(server, &count, clients)
-        : ESP_FAIL;
-    if (json_valid && list_err == ESP_OK) {
+    const bool json_valid = telemetry_pending &&
+                            len > 0 && len < (int)sizeof(json);
+    const esp_err_t list_err = httpd_get_client_list(server, &count, clients);
+    if (list_err == ESP_OK) {
         int websocket_clients[WEB_MAX_CLIENTS];
         size_t websocket_count = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -435,23 +442,32 @@ static void broadcast_work(void *arg)
                 }
             }
         }
-        if (websocket_count > 0) {
+        if (telemetry_pending && json_valid && websocket_count > 0) {
 #if WEB_TELEMETRY_DEBUG
             ESP_LOGI(TAG, "Broadcast telemetry to %d clients",
                      (int)websocket_count);
 #endif
+            uint32_t sent_count = 0;
+            uint32_t dropped_count = 0;
             for (size_t i = 0; i < websocket_count; ++i) {
                 const bool sent = send_text(websocket_clients[i], json);
-                portENTER_CRITICAL(&state_mux);
                 if (sent) {
-                    web_stats.telemetry_frames++;
+                    sent_count++;
                 } else {
-                    web_stats.telemetry_dropped++;
+                    dropped_count++;
                 }
-                portEXIT_CRITICAL(&state_mux);
             }
+            portENTER_CRITICAL(&state_mux);
+            last_broadcast_generation = generation;
+            web_stats.telemetry_client_frames += sent_count;
+            web_stats.telemetry_dropped += dropped_count;
+            if (sent_count > 0) {
+                web_stats.telemetry_broadcasts++;
+            }
+            portEXIT_CRITICAL(&state_mux);
         }
-    } else {
+    }
+    if (telemetry_pending && (!json_valid || list_err != ESP_OK)) {
         portENTER_CRITICAL(&state_mux);
         web_stats.telemetry_dropped++;
         portEXIT_CRITICAL(&state_mux);
