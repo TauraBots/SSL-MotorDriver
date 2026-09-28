@@ -447,7 +447,8 @@ class ConfiguratorApp:
         self.port_box.pack(side="left", padx=(8, 18))
         self.label(connection, "Baud", color=self.MUTED).pack(side="left")
         ttk.Combobox(connection, textvariable=self.baud_var,
-                     values=("9600", "115200", "921600", "1000000"),
+                     values=("9600", "14400", "19200", "38400", "115200",
+                             "921600", "1000000"),
                      width=10).pack(side="left", padx=8)
         self.button(connection, "↻", self.refresh_ports).pack(side="left", padx=6)
         self.connect_button = self.button(connection, "CONECTAR", self.toggle_connection, accent=True)

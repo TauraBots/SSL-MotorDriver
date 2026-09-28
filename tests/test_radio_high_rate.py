@@ -1,18 +1,24 @@
+import os
 import struct
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "configurator"))
 
 from core.protocol import Protocol
 from core.radio_manager import RadioManager
-from core.radio_profile import NORMAL, TEST_50_20, VALIDATION_120
+from core.radio_profile import (NORMAL, RADIO_PROFILES, TEST_50_20,
+                                VALIDATION_120, airport_ota_capacity_message,
+                                estimate_protocol_traffic)
 from core.radio_scheduler import RadioScheduler
-from ui.main_window import SERIAL_BAUD_OPTIONS
+from PySide6.QtWidgets import QApplication
+from ui.main_window import MainWindow, SERIAL_BAUD_OPTIONS
 
 
 def telemetry_frame(robot_id, sequence, flags):
@@ -76,6 +82,12 @@ class RadioProfileAndSchedulerTests(unittest.TestCase):
                           VALIDATION_120.telemetry_full_hz), (120, 120, 10))
         self.assertFalse(VALIDATION_120.telemetry_reply_guard)
 
+    def test_all_profiles_use_safe_airport_default_not_direct_uart_baud(self):
+        self.assertTrue(all(profile.default_airport_baud == 9600
+                            for profile in RADIO_PROFILES))
+        self.assertTrue(all(profile.default_airport_baud != 921600
+                            for profile in RADIO_PROFILES))
+
     def test_command_is_written_before_telemetry_when_both_are_due(self):
         clock = SimulatedClock(); radio = RadioManager(); serial = ResponsiveFakeSerial(clock)
         radio._serial = serial; radio.state.robot_id = "A"; radio.state.connected = True
@@ -127,8 +139,41 @@ class RadioProfileAndSchedulerTests(unittest.TestCase):
         self.assertEqual(radio._request_sequence, 0)
         self.assertIn(0, radio._telemetry_requests)
 
-    def test_921600_is_available(self):
-        self.assertIn(921600, SERIAL_BAUD_OPTIONS)
+    def test_airport_and_direct_debug_bauds_are_available(self):
+        for baud in (9600, 14400, 19200, 38400, 115200, 921600, 1000000):
+            self.assertIn(baud, SERIAL_BAUD_OPTIONS)
+
+    def test_protocol_traffic_estimate_uses_actual_frame_sizes(self):
+        normal = estimate_protocol_traffic(NORMAL)
+        validation = estimate_protocol_traffic(VALIDATION_120)
+        self.assertEqual((normal.command_frame_bytes,
+                          normal.telemetry_request_frame_bytes,
+                          normal.telemetry_fast_response_bytes,
+                          normal.telemetry_full_response_bytes), (19, 10, 34, 51))
+        self.assertEqual((normal.estimated_protocol_tx_bytes_per_s,
+                          normal.estimated_protocol_rx_bytes_per_s), (430, 255))
+        self.assertEqual((validation.estimated_protocol_tx_bytes_per_s,
+                          validation.estimated_protocol_rx_bytes_per_s), (3480, 4250))
+        self.assertIn("capacity unknown", airport_ota_capacity_message(NORMAL))
+        self.assertIn("exceeds", airport_ota_capacity_message(VALIDATION_120, 1000))
+
+    def test_profile_selection_does_not_change_serial_baud_and_ui_separates_rates(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow(SimpleNamespace(port=None, baud=9600))
+        try:
+            self.assertEqual(window.header_profile.currentData(), "NORMAL")
+            window.header_baud.setCurrentText("921600")
+            window.header_profile.setCurrentIndex(4)
+            self.assertEqual(window.manager.profile, VALIDATION_120)
+            self.assertEqual(window.header_baud.currentText(), "921600")
+            window.update_link_metrics()
+            diagnostics = window.diagnostics.link_metrics.text()
+            self.assertIn("Transport: AirPort · Serial baud: 921600", diagnostics)
+            self.assertIn("Command — Target: 120 Hz · Measured:", diagnostics)
+            self.assertIn("Telemetry — Target: 120 Hz · Requests:", diagnostics)
+            self.assertIn("AirPort OTA capacity unknown", diagnostics)
+        finally:
+            window.close()
 
 
 class RadioFakeSerialIntegrationTests(unittest.TestCase):

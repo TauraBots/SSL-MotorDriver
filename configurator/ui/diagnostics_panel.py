@@ -33,14 +33,24 @@ class DiagnosticsPanel(QWidget):
         self.rx.setText(str(data.get("received_packets", "—"))); self.crc.setText(str(data.get("crc_errors", "—")))
         self.serial_status.setText(f"Sequência recebida: {data.get('command_sequence', '—')} · polling ativo")
 
-    def update_link_stats(self, profile, stats):
+    def update_link_stats(self, profile, stats, serial_baud=None, traffic=None,
+                          capacity_note="AirPort OTA capacity unknown — validate experimentally."):
         value = lambda number: "—" if number is None else f"{number:.1f}"
+        baud = "—" if serial_baud is None else str(serial_baud)
+        traffic_text = ""
+        if traffic is not None:
+            traffic_text = (
+                f"\nEstimated protocol traffic — PC→robot "
+                f"{traffic.estimated_protocol_tx_bytes_per_s:.0f} B/s · robot→PC "
+                f"{traffic.estimated_protocol_rx_bytes_per_s:.0f} B/s")
         self.link_metrics.setText(
+            f"Transport: AirPort · Serial baud: {baud}\n"
             f"Profile: {profile.display_name}\n"
-            f"Command — target {profile.command_hz:g} Hz · measured {stats.command_tx_hz:.1f} Hz\n"
-            f"Telemetry requests — target {profile.telemetry_fast_hz:g} Hz · measured {stats.telemetry_request_tx_hz:.1f} Hz\n"
-            f"Telemetry responses — measured {stats.telemetry_response_rx_hz:.1f} Hz · response loss {stats.telemetry_response_loss_percent:.1f}%\n"
+            f"Command — Target: {profile.command_hz:g} Hz · Measured: {stats.command_tx_hz:.1f} Hz\n"
+            f"Telemetry — Target: {profile.telemetry_fast_hz:g} Hz · Requests: {stats.telemetry_request_tx_hz:.1f} Hz · Responses: {stats.telemetry_response_rx_hz:.1f} Hz\n"
+            f"Response loss: {stats.telemetry_response_loss_percent:.1f}%\n"
             f"Latency — last {value(stats.latency_last_ms)} ms · mean {value(stats.latency_mean_ms)} ms · max {value(stats.latency_max_ms)} ms · p95 {value(stats.latency_p95_ms)} ms\n"
             f"Missed deadlines — CMD {stats.command_deadlines_missed} · TEL {stats.telemetry_deadlines_missed}\n"
-            f"Throughput — TX {stats.tx_bytes_per_s / 1000:.2f} kB/s · RX {stats.rx_bytes_per_s / 1000:.2f} kB/s"
+            f"Measured throughput — TX {stats.tx_bytes_per_s / 1000:.2f} kB/s · RX {stats.rx_bytes_per_s / 1000:.2f} kB/s"
+            f"{traffic_text}\n{capacity_note}"
         )

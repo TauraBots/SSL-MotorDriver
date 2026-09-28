@@ -10,7 +10,8 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
-from core import RADIO_PROFILES, RadioManager, telemetry_csv_row
+from core import (RADIO_PROFILES, RadioManager, airport_ota_capacity_message,
+                  estimate_protocol_traffic, telemetry_csv_row)
 from core.telemetry import CSV_HEADER
 from .analysis_panel import AnalysisPanel
 from .config_panel import ConfigPanel
@@ -21,7 +22,7 @@ from .fleet_panel import FleetPanel
 from .telemetry_panel import TelemetryPanel
 from .widgets import HeaderStatusItem
 
-SERIAL_BAUD_OPTIONS = (9600, 115200, 921600, 1000000)
+SERIAL_BAUD_OPTIONS = (9600, 14400, 19200, 38400, 115200, 921600, 1000000)
 
 
 class MainWindow(QMainWindow):
@@ -50,7 +51,9 @@ class MainWindow(QMainWindow):
         controls = QFrame(); controls.setObjectName("headerControls"); controls.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred); control_row = QHBoxLayout(controls); control_row.setContentsMargins(10, 6, 10, 6); control_row.setSpacing(7)
         self.header_port = QComboBox(); self.header_port.setEditable(False); self.header_port.setFixedWidth(120)
         self.header_baud = QComboBox(); self.header_baud.setEditable(False); self.header_baud.addItems([str(value) for value in SERIAL_BAUD_OPTIONS]); self.header_baud.setCurrentText(str(self.args.baud)); self.header_baud.setFixedWidth(92)
+        self.header_baud.setToolTip("AirPort serial baud must match on PC/TX, RX and STM32 UART.")
         self.header_profile = QComboBox(); self.header_profile.setFixedWidth(190)
+        self.header_profile.setToolTip("Logical D0/E0 targets; this does not configure serial baud or ELRS packet rate.")
         for profile in RADIO_PROFILES: self.header_profile.addItem(profile.display_name, profile.name)
         if self.args.port: self.header_port.setCurrentText(self.args.port)
         for label_text, widget in (("SERIAL PORT", self.header_port), ("BAUD RATE", self.header_baud), ("RADIO PROFILE", self.header_profile)):
@@ -87,6 +90,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.header_connect.clicked.connect(self.toggle_connection); self.header_refresh.clicked.connect(self.refresh_ports)
         self.header_profile.currentIndexChanged.connect(self.change_radio_profile)
+        self.header_baud.currentTextChanged.connect(lambda: self.update_link_metrics())
         self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
         self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.fleet.discovery_requested.connect(self.manager.discover_robots); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
         self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(self.on_communication_error)
@@ -98,19 +102,25 @@ class MainWindow(QMainWindow):
     def change_radio_profile(self):
         profile = RADIO_PROFILES[self.header_profile.currentIndex()]
         self.manager.set_radio_profile(profile)
-        if profile.name != "NORMAL":
-            if not self.manager.is_connected:
-                self.header_baud.setCurrentText(str(profile.recommended_baud))
-            elif self.manager.state.baud != profile.recommended_baud:
-                QMessageBox.warning(
-                    self, "Baud rate do perfil",
-                    f"{profile.display_name} recomenda {profile.recommended_baud} baud. "
-                    f"A conexão atual permanece em {self.manager.state.baud}; reconecte manualmente para alterar.")
+        if self.manager.is_connected and self.manager.state.baud != profile.default_airport_baud:
+            self.warn_airport_baud(self.manager.state.baud)
         self.update_link_metrics()
+
+    def warn_airport_baud(self, baud):
+        QMessageBox.warning(
+            self, "AirPort serial baud",
+            f"Current serial baud is {baud}. AirPort serial baud must match on PC/TX, RX "
+            "and STM32 UART. 9600 is the current test default, not a baud imposed by the "
+            "radio profile target.")
 
     def update_link_metrics(self):
         now_ns = time.monotonic_ns(); stats = self.manager.link_stats.snapshot(now_ns)
-        self.diagnostics.update_link_stats(self.manager.profile, stats)
+        baud_text = self.header_baud.currentText().strip()
+        serial_baud = int(baud_text) if baud_text else None
+        estimate = estimate_protocol_traffic(self.manager.profile)
+        capacity_note = airport_ota_capacity_message(self.manager.profile)
+        self.diagnostics.update_link_stats(
+            self.manager.profile, stats, serial_baud, estimate, capacity_note)
         if self.link_log_writer and now_ns - self._last_link_log_ns >= 1_000_000_000:
             self._last_link_log_ns = now_ns
             self.link_log_writer.writerow([
@@ -209,6 +219,8 @@ class MainWindow(QMainWindow):
         if self.manager.is_connected: self.manager.disconnect_serial(); return
         try: port, baud = self.serial_settings()
         except Exception as exc: self.show_error("Conexão", str(exc)); return
+        if baud != self.manager.profile.default_airport_baud:
+            self.warn_airport_baud(baud)
         self.manager.connect_serial(port, baud, "A")
 
     def on_connected(self, port, baud, robot_id):

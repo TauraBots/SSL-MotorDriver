@@ -2,7 +2,7 @@
 
 ## Objetivo e arquitetura
 
-Este modo existe para **medir** a taxa sustentável do transporte; ele não afirma
+Este modo existe para **medir** a taxa sustentável do transporte; não afirma
 que o AirPort suporte 120 Hz. A arquitetura operacional ensaiada é:
 
 ```text
@@ -15,104 +15,179 @@ TAURA Framework / Configurator (PC)
           STM32 Quad-MD
 ```
 
-O AirPort continua sendo somente um transporte serial transparente. O protocolo
-binário da Quad-MD não muda: D0, E0, E1, E2, E3 e F0–F5 mantêm layout, SOF, CRC,
-ID e sequências atuais. Não há MAVLink nem CRSF customizado. STM32, receptor
-AirPort e lado PC devem estar configurados com baud rates compatíveis; o
-Configurator não configura o firmware do AirPort.
+O AirPort é somente um transporte serial transparente. O protocolo binário da
+Quad-MD não muda: D0, E0, E1, E2, E3 e F0–F5 mantêm layout, SOF, CRC, ID e
+sequências atuais. Não há MAVLink nem CRSF customizado.
 
-## Perfis
+## Três taxas diferentes
 
-| Perfil | D0 target | E0 FAST target global | FULL target por robô | Baud recomendado | Reply guard |
+- **Serial baud** é a velocidade UART entre PC/TX e entre RX/STM32.
+- **ELRS packet rate** é a frequência de pacotes no enlace RF.
+- **Protocol target rate** é a frequência lógica desejada de D0, E0 e E1.
+
+Esses valores não são equivalentes. Serial baud de 9600 não significa
+telemetria a 9600 Hz. Um packet rate ELRS de 333 Hz também não significa E1 a
+333 Hz. O perfil define somente targets lógicos e não configura baud nem packet
+rate RF.
+
+## Baud e capacidade do AirPort
+
+O AirPort não transporta dados OTA na mesma velocidade de qualquer baud UART
+arbitrariamente selecionado. Seu buffer serial é limitado a 64 bytes. Se a
+UART fornecer dados mais rapidamente do que o enlace OTA consegue escoar, o
+buffer pode encher e dados podem ser descartados.
+
+Referência de capacidade AirPort a ser confrontada com o packet rate realmente
+configurado no TX/ELRS:
+
+| Packet rate | Máximo aproximado OTA | Baud sugerido |
+|---|---:|---:|
+| 25 Hz | ~62 B/s | 600 |
+| 50 Hz | ~125 B/s | 1200 |
+| 100 Hz | ~250 B/s | 2400 |
+| 100 Hz Full Res | ~500 B/s | 4800 |
+| 150 Hz | ~375 B/s | 2400 |
+| 200 Hz | ~500 B/s | 4800 |
+| 200 Hz Full Res | ~1000 B/s | 9600 |
+| 250 Hz | ~625 B/s | 4800 |
+| 333 Hz Full Res | ~1665 B/s | 9600 ou 14400 |
+| 500 Hz | ~1250 B/s | 9600 |
+| 1000 Hz | ~2500 B/s | 19200 |
+| 1000 Hz Full Res | ~5000 B/s | 38400 |
+
+O RX deste ensaio é 2.4 GHz. O ponto inicial é 9600 baud, já confirmado
+fisicamente no BETAFPV 2.4GHz Nano RX com ExpressLRS 4.0.0 e protocolo AirPort.
+Isso não identifica nem presume o packet rate RF atual; ele deve ser conferido
+no TX/ELRS.
+
+As opções 115200, 921600 e 1000000 continuam disponíveis para conexão direta,
+debug e outros transportes. Em particular, o caminho independente STM32 ↔
+ESP32 usado no artigo pode continuar em 921600 baud. Esse valor não é uma
+recomendação para AirPort.
+
+## Perfis lógicos
+
+| Perfil | D0 target | E0 FAST target global | FULL target por robô | Default inicial AirPort | Reply guard |
 |---|---:|---:|---:|---:|---|
 | NORMAL | 20 Hz | 5 Hz | 5 Hz | 9600 | sim |
-| TEST 50/20 | 50 Hz | 20 Hz | 10 Hz | 921600 | não |
-| TEST 100/50 | 100 Hz | 50 Hz | 10 Hz | 921600 | não |
-| TEST 120/60 | 120 Hz | 60 Hz | 10 Hz | 921600 | não |
-| VALIDATION 120 | 120 Hz | 120 Hz | 10 Hz | 921600 | não |
+| TEST 50/20 | 50 Hz | 20 Hz | 10 Hz | 9600 | não |
+| TEST 100/50 | 100 Hz | 50 Hz | 10 Hz | 9600 | não |
+| TEST 120/60 | 120 Hz | 60 Hz | 10 Hz | 9600 | não |
+| VALIDATION 120 | 120 Hz | 120 Hz | 10 Hz | 9600 | não |
+
+9600 é o baud inicial atualmente configurado no AirPort; ele **não garante**
+que o tráfego target de qualquer perfil caiba no enlace. Trocar o perfil não
+altera o ComboBox de baud. A taxa medida é que determina o resultado.
 
 NORMAL é o perfil seguro e padrão e preserva a guarda legada de resposta. Os
-demais perfis são experimentais e expressam apenas frequências alvo. Ao escolher
-um perfil experimental desconectado, a GUI seleciona 921600. Se já houver uma
-conexão em outro baud, a GUI avisa e não a altera silenciosamente.
-
-O scheduler usa um `PreciseTimer` de 1 ms apenas para despertar a aplicação. A
-decisão de envio usa `time.monotonic_ns()` e deadlines acumulados, portanto o
-período de 120 Hz é 8,333333 ms e não é arredondado para um timer de 8 ms. Se o
-event loop atrasar, no máximo um D0 e um E0 são enviados naquela passagem; os
-deadlines omitidos são contados, sem rajada de recuperação. Quando ambos vencem
-juntos, D0 é enviado primeiro. VALIDATION 120 desloca E0 em meia fase para
-distribuir os bytes no tempo.
+demais perfis são experimentais. O scheduler usa `PreciseTimer` de 1 ms apenas
+para despertar a aplicação e decide envios com `time.monotonic_ns()` e deadlines
+acumulados. Atrasos não geram rajadas; D0 tem prioridade e deadlines omitidos
+são contabilizados. VALIDATION 120 desloca E0 em meia fase.
 
 ## Telemetria FAST e FULL
 
 - FAST solicita `BASIC | MOTORS`.
-- FULL solicita `BASIC | MOTORS | BATTERY | DIAGNOSTICS`.
-- Em perfis divididos, um FULL **substitui** o FAST daquele ciclo. Nunca são
-  enviados os dois pedidos no mesmo ciclo, então a taxa global de E0 permanece
-  limitada pelo target FAST.
-- O agendamento de FULL é mantido por ID de robô. O polling E0 continua em
-  round-robin e independente do robô selecionado para comando.
+- FULL solicita também `BATTERY | DIAGNOSTICS`.
+- FULL substitui FAST naquele ciclo, mantendo E0 limitado ao target FAST.
+- FULL é acompanhado por ID de robô.
+- O polling E0 permanece round-robin e independente do robô ativo para D0.
 
-A taxa FAST é global para o link, não por robô. Com target global de 120 E0/s,
-um robô pode receber até aproximadamente 120 pedidos/s, dois recebem cerca de
-60/s cada e quatro recebem cerca de 30/s cada. D0 continua destinado somente ao
-robô ativo.
+A taxa FAST é global. Em 120 E0/s, um robô pode receber aproximadamente 120
+pedidos/s, dois recebem cerca de 60/s cada e quatro cerca de 30/s cada.
 
-## Medições
+## Carga útil do protocolo
 
-O painel Diagnóstico separa sempre `target` de `measured`. As taxas medidas usam
-eventos transmitidos/recebidos em uma janela monotônica limitada. Latência é
-`(response_rx_time_ns - request_tx_time_ns) / 1e6`; o painel mostra última,
-média, máxima e p95 da janela.
+Tamanhos reais do protocolo atual:
 
-Uma solicitação sem E1 correlacionável antes de `response_timeout_ms` é uma
-`telemetry response loss`, não uma alegação de perda de pacote RF. A porcentagem
-usa respostas válidas e timeouts considerados na janela. Respostas tardias ou
-sem request correspondente são contabilizadas como `unmatched`.
-
-O botão **GRAVAR MÉTRICAS CSV** no painel Diagnóstico grava uma linha por segundo
-em `radio_link_metrics.csv` (ou no caminho escolhido), incluindo perfil,
-quantidade de robôs, targets, taxas medidas, perda de resposta, latências,
-deadlines perdidos e bytes/s. Não é gravada uma linha por pacote.
-
-## Estimativa de banda do protocolo
-
-Para um robô em VALIDATION 120, pelos tamanhos reais atuais:
-
-- D0: 19 bytes × 120 Hz = 2280 B/s no sentido PC → STM32;
-- E0: 10 bytes × 120 Hz = 1200 B/s no sentido PC → STM32;
+- D0: 19 bytes;
+- E0: 10 bytes;
 - E1 FAST: 34 bytes (`base 11 + BASIC 7 + MOTORS 16`);
-- E1 FULL: 51 bytes (`FAST 34 + BATTERY 4 + DIAGNOSTICS 13`);
-- E1 combinado: 110 × 34 + 10 × 51 ≈ 4250 B/s no sentido STM32 → PC.
+- E1 FULL: 51 bytes (`FAST 34 + BATTERY 4 + DIAGNOSTICS 13`).
 
-Logo, a carga útil aproximada é 3480 B/s de ida e 4250 B/s de volta, antes de
-considerar discovery/configuração. Esses valores são carga serial útil do
-protocolo. Eles não representam framing UART, correções, encapsulamento,
-retransmissões ou qualquer outro overhead RF interno do ELRS/AirPort.
+Estimativa para um robô, com FULL substituindo FAST:
 
-Os limites atuais de RX são proporcionais a essa carga: 512 bytes por wake-up,
-buffer limitado a 4096 bytes e até 32 frames processados por passagem. Um E1
-FAST a 120 Hz representa cerca de 4080 B/s, muito abaixo da capacidade de
-drenagem nominal desses limites, sem criar buffer ilimitado.
+| Perfil | PC → robô | Robô → PC |
+|---|---:|---:|
+| NORMAL | 20×19 + 5×10 = **430 B/s** | 5×51 = **255 B/s** |
+| TEST 50/20 | 50×19 + 20×10 = **1150 B/s** | 10×34 + 10×51 = **850 B/s** |
+| TEST 100/50 | 100×19 + 50×10 = **2400 B/s** | 40×34 + 10×51 = **1870 B/s** |
+| TEST 120/60 | 120×19 + 60×10 = **2880 B/s** | 50×34 + 10×51 = **2210 B/s** |
+| VALIDATION 120 | 120×19 + 120×10 = **3480 B/s** | 110×34 + 10×51 = **4250 B/s** |
 
-## Procedimento progressivo no hardware
+Isso é carga serial útil da Quad-MD. Não inclui framing UART nem overhead,
+encapsulamento, correção ou retransmissão internos do ExpressLRS. A comparação
+com capacidade OTA é apenas informativa e não bloqueia perfis. Enquanto o modo
+RF não for informado, o Configurator mostra: **AirPort OTA capacity unknown —
+validate experimentally.** Taxas medidas abaixo do target podem representar o
+limite do transporte, e não necessariamente um defeito do scheduler.
 
-1. Confirme o mesmo baud no PC, nos dois lados AirPort e na STM32. Comece em
-   NORMAL (20/5) e observe por pelo menos alguns segundos.
-2. Selecione manualmente TEST 50/20 e registre taxa real de D0, pedidos E0,
-   respostas E1, perda de resposta, latência e deadlines perdidos.
-3. Repita com TEST 100/50.
-4. Repita com TEST 120/60.
-5. Somente então selecione VALIDATION 120 e repita a medição.
+## Medições e diagnóstico
 
-Não há avanço automático entre perfis. Para cada etapa, verifique também jitter
-por meio dos deadlines perdidos e exporte o CSV para comparação posterior. Se a
-taxa medida ficar abaixo do target ou deadlines crescerem, registre o resultado
-como limite observado do conjunto PC/Qt/serial/AirPort naquele ensaio.
+O painel Diagnóstico mostra separadamente transporte, baud serial, perfil,
+targets e taxas medidas de comandos, requests e responses. As taxas medidas
+usam eventos reais em uma janela monotônica; o número configurado no perfil
+nunca é apresentado como resultado medido.
+
+Latência é calculada por
+`(response_rx_time_ns - request_tx_time_ns) / 1e6`. Uma request sem E1
+correspondente antes de `response_timeout_ms` entra em `telemetry response
+loss`; isso não é chamado automaticamente de perda RF. Respostas tardias ou
+sem request correspondente são contabilizadas separadamente como unmatched.
+
+O botão **GRAVAR MÉTRICAS CSV** gera uma linha por segundo com targets, taxas
+medidas, response loss, latências, deadlines perdidos e throughput observado.
+Use esse arquivo para comparar cada etapa do teste progressivo.
+
+## Prerequisite before physical AirPort test
+
+PC/TX, RX e UART da STM32 devem usar exatamente o mesmo baud. Para o teste
+AirPort atual, os três lados devem estar em 9600 baud. O firmware STM32 usado no
+caminho direto com ESP32 pode estar configurado de outra forma; não misture as
+duas configurações e não conecte antes de confirmar a UART da STM32.
+
+Esta alteração não cria nem aplica um novo perfil no firmware STM32.
+
+## Primeiro teste físico confirmado
+
+Hardware:
+
+```text
+PC / COM4
+  ↕ ELRS TX / AirPort
+  ↕ RF
+BETAFPV 2.4GHz Nano RX / ExpressLRS 4.0.0
+  Serial Protocol = AirPort
+  AirPort baud = 9600
+  ↕ UART
+STM32 Quad-MD
+```
+
+Configuração inicial na UI:
+
+- Serial port: `COM4`
+- Serial baud: `9600`
+- Radio Profile: `NORMAL`
+- Command target: 20 Hz
+- Telemetry target: 5 Hz
+
+Verifique discovery, D0, E0, E1, bateria, RPM, latência, response loss, CRC e
+watchdog de comunicação. Somente após NORMAL estável, suba manualmente:
+
+1. TEST 50/20;
+2. TEST 100/50;
+3. TEST 120/60;
+4. VALIDATION 120.
+
+Em cada etapa, grave métricas por alguns segundos. Não há avanço automático e
+nenhum perfil afirma que o AirPort sustentará seu target.
 
 ## Execução
 
-Instale as dependências com `python -m pip install -r configurator/requirements.txt`
-e execute `python configurator/ssl-configurator.py app`. Selecione porta, baud e
-**RADIO PROFILE** no cabeçalho; NORMAL permanece selecionado por padrão.
+```powershell
+python -m pip install -r configurator/requirements.txt
+python configurator/ssl-configurator.py app --port COM4 --baud 9600
+```
+
+O ComboBox continua listando todas as portas detectadas; COM4 é apenas o exemplo
+do hardware atual, não uma dependência do código.
