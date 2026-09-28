@@ -6,9 +6,12 @@ import time
 
 import serial
 from serial.tools import list_ports
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 from .protocol import Protocol
+from .radio_profile import NORMAL, get_radio_profile
+from .radio_scheduler import RadioScheduler
+from .radio_stats import RadioLinkStats
 from .robot_state import RobotState
 from .telemetry import TelemetryHistory
 
@@ -19,13 +22,15 @@ class SerialManager(QObject):
     connected = Signal(str, int, str)
     disconnected = Signal()
     telemetry_received = Signal(dict)
-    command_sent = Signal(float, float, float, int)
+    # The wire sequence is uint32; PySide's ``int`` signal is signed 32-bit.
+    command_sent = Signal(float, float, float, object)
     telemetry_lost = Signal()
     error = Signal(str)
     boards_discovered = Signal(object, int)
     board_configured = Signal(str)
     motion_configured = Signal(float, float)
     configuration_finished = Signal()
+    profile_changed = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,12 +39,15 @@ class SerialManager(QObject):
         self._serial = None
         self._rx = bytearray()
         self._timer = QTimer(self)
-        self._timer.setInterval(10)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(1)
         self._timer.timeout.connect(self._tick)
         self._sequence = int(time.time() * 1000) & 0xFFFFFFFF
         self._request_sequence = 0
         self._telemetry_sent_at = {}
-        self._next_command = self._next_telemetry = 0.0
+        self.profile = NORMAL
+        self.scheduler = RadioScheduler(self.profile)
+        self.link_stats = RadioLinkStats()
         self._last_motion = time.monotonic()
         self._last_telemetry = 0.0
         self._lost_emitted = False
@@ -70,8 +78,10 @@ class SerialManager(QObject):
             self.state = RobotState(robot_id=robot_id, connected=True, port=port, baud=baud,
                                     communication_status="waiting")
             self._rx.clear(); self.history.clear(); self._request_sequence = 0
-            now = time.monotonic()
-            self._next_command, self._next_telemetry, self._last_motion = now, now + 0.1, now
+            self._telemetry_sent_at.clear()
+            now_ns = time.monotonic_ns(); now = now_ns / 1_000_000_000
+            self.scheduler.reset(now_ns); self.link_stats.reset(now_ns)
+            self._last_motion = now
             self._last_telemetry = 0.0; self._lost_emitted = False
             self._target = (0.0, 0.0, 0.0); self._brake = True
             self._timer.start()
@@ -121,8 +131,8 @@ class SerialManager(QObject):
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
         if not self.is_connected: return
         self._sequence = (self._sequence + 1) & 0xFFFFFFFF
-        self._serial.write(Protocol.encode_velocity(self.state.robot_id, self._sequence,
-                                                    vx, vy, omega, kick_power, brake))
+        self._write_frame(Protocol.encode_velocity(self.state.robot_id, self._sequence,
+                                                   vx, vy, omega, kick_power, brake), "command")
         self.command_sent.emit(vx, vy, omega, self._sequence)
 
     def emergency_stop(self):
@@ -131,12 +141,33 @@ class SerialManager(QObject):
         try: self.send_command(0.0, 0.0, 0.0, brake=True)
         except Exception as exc: self.error.emit(str(exc))
 
-    def send_telemetry_request(self):
+    def send_telemetry_request(self, flags=Protocol.TELEMETRY_FLAGS_FULL):
         if not self.is_connected: return
         self._request_sequence = (self._request_sequence + 1) & 0xFFFF
-        self._telemetry_sent_at[self._request_sequence] = time.monotonic()
-        self._serial.write(Protocol.encode_telemetry_request(self.state.robot_id,
-                                                             self._request_sequence))
+        sent_ns = time.monotonic_ns()
+        self._telemetry_sent_at[self._request_sequence] = {
+            "request_sequence": self._request_sequence, "robot_id": self.state.robot_id,
+            "sent_time_ns": sent_ns, "flags": flags,
+        }
+        self._write_frame(Protocol.encode_telemetry_request(
+            self.state.robot_id, self._request_sequence, flags), "telemetry_request", sent_ns)
+
+    def set_radio_profile(self, profile):
+        profile = get_radio_profile(profile)
+        now_ns = time.monotonic_ns()
+        self.profile = profile
+        self.scheduler.set_profile(profile, now_ns)
+        self._telemetry_sent_at.clear()
+        self.link_stats.reset(now_ns)
+        self.profile_changed.emit(profile)
+
+    def _write_frame(self, frame, kind=None, now_ns=None):
+        now_ns = time.monotonic_ns() if now_ns is None else int(now_ns)
+        written = self._serial.write(frame)
+        self.link_stats.record_tx_bytes(now_ns, written)
+        if kind == "command": self.link_stats.record_command(now_ns)
+        elif kind == "telemetry_request": self.link_stats.record_request(now_ns)
+        return written
 
     def _limited_motion(self, now):
         vx, vy, omega = self._target
@@ -153,35 +184,64 @@ class SerialManager(QObject):
     def _tick(self):
         if not self.is_connected: return
         try:
-            now = time.monotonic()
-            if now >= self._next_command:
+            now_ns = time.monotonic_ns(); now = now_ns / 1_000_000_000
+            # Drain available RX first; never wait for bytes in the Qt thread.
+            waiting = min(self._serial.in_waiting, self.MAX_RX_READ_PER_TICK)
+            if waiting:
+                chunk = self._serial.read(waiting); self._rx.extend(chunk)
+                self.link_stats.record_rx_bytes(now_ns, len(chunk))
+                if len(self._rx) > self.MAX_RX_BUFFER_SIZE:
+                    del self._rx[:-self.MAX_RX_BUFFER_SIZE]
+            if self._rx:
+                self._consume_rx(now_ns)
+            self._expire_telemetry_requests(now_ns)
+
+            due = self.scheduler.take_due(now_ns)
+            self.link_stats.record_missed(due.command_missed, due.telemetry_missed)
+            # D0 always wins when command and telemetry share a scheduler wake-up.
+            if due.command:
                 motion = self._limited_motion(now)
                 kick = self._kick_power if self._kick_pending else 0
                 self.send_command(*motion, kick_power=kick,
                                   brake=self._brake or motion == (0.0, 0.0, 0.0))
-                self._kick_pending = False; self._next_command = now + 0.05
-            if now >= self._next_telemetry:
-                self.send_telemetry_request(); self._next_telemetry = now + 0.2
-                self._next_command = max(self._next_command, now + Protocol.TELEMETRY_REPLY_WINDOW_S)
-            waiting = min(self._serial.in_waiting, self.MAX_RX_READ_PER_TICK)
-            if waiting:
-                self._rx.extend(self._serial.read(waiting))
-                if len(self._rx) > self.MAX_RX_BUFFER_SIZE:
-                    del self._rx[:-self.MAX_RX_BUFFER_SIZE]
-                self._consume_rx(now)
+                self._kick_pending = False
+            if due.telemetry:
+                self.send_telemetry_request(self._telemetry_flags_for_next_request(now_ns))
+                if self.profile.telemetry_reply_guard:
+                    guard_ns = round(Protocol.TELEMETRY_REPLY_WINDOW_S * 1_000_000_000)
+                    self.scheduler.guard_command_until(now_ns + guard_ns)
             if self._last_telemetry and now - self._last_telemetry > 1.0 and not self._lost_emitted:
                 self._lost_emitted = True; self.telemetry_lost.emit()
         except Exception as exc:
             self.disconnect_serial(send_brake=False); self.error.emit(str(exc))
 
+    def _telemetry_flags_for_next_request(self, now_ns):
+        return Protocol.TELEMETRY_FLAGS_FULL
+
+    def _expire_telemetry_requests(self, now_ns):
+        timeout_ns = self.profile.response_timeout_ms * 1_000_000
+        expired = [sequence for sequence, request in self._telemetry_sent_at.items()
+                   if now_ns - request["sent_time_ns"] > timeout_ns]
+        for sequence in expired:
+            del self._telemetry_sent_at[sequence]
+            self.link_stats.record_timeout(now_ns)
+
+    @staticmethod
+    def _as_ns(value):
+        # Compatibility for callers/tests that still pass time.monotonic().
+        return int(value * 1_000_000_000) if isinstance(value, float) else int(value)
+
     def _consume_rx(self, now):
+        now_ns = self._as_ns(now)
         data = Protocol.parse_telemetry(self._rx, self.state.robot_id)
         if not data: return
-        sent_at = self._telemetry_sent_at.pop(data["request_sequence"], None)
-        data["latency_ms"] = None if sent_at is None else max(0, int((now - sent_at) * 1000))
-        self._telemetry_sent_at = {seq: sent for seq, sent in self._telemetry_sent_at.items()
-                                   if now - sent < 2.0}
-        self._last_telemetry = now; self._lost_emitted = False
+        request = self._telemetry_sent_at.pop(data["request_sequence"], None)
+        if request is None or request["robot_id"] != data["robot_id"]:
+            data["latency_ms"] = None; self.link_stats.record_unmatched()
+        else:
+            data["latency_ms"] = max(0.0, (now_ns - request["sent_time_ns"]) / 1_000_000)
+            self.link_stats.record_response(now_ns, data["latency_ms"])
+        self._last_telemetry = now_ns / 1_000_000_000; self._lost_emitted = False
         self.state.apply_telemetry(data); self.history.append(data)
         self.telemetry_received.emit(data)
 

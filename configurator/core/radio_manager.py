@@ -24,7 +24,7 @@ class RadioManager(SerialManager):
         self._discovery_sent_at = {}; self._discovery_seen = set(); self._discovery_generation = 0
         self._config_action = None; self._config_generation = 0
         self._config_responses = []; self._config_received_bytes = 0
-        self._fleet_poll_index = 0; self._telemetry_requests = {}
+        self._fleet_poll_index = 0; self._telemetry_requests = {}; self._last_full_request_ns = {}
         self._fleet_health_timer = QTimer(self); self._fleet_health_timer.setInterval(250)
         self._fleet_health_timer.timeout.connect(self._expire_stale_robots); self._fleet_health_timer.start()
         self.connected.connect(lambda port, baud, robot_id: self.robots.set_radio_connected(True, port=port, baud=baud))
@@ -41,19 +41,55 @@ class RadioManager(SerialManager):
         count = max(1, len(self.robots.discovered_robots))
         self.robots.expire_stale(timeout_s=max(1.5, count * 0.5))
 
-    def send_telemetry_request(self):
-        if not self.is_connected: return
+    def connect_serial(self, port, baud, robot_id):
+        self._telemetry_requests.clear(); self._last_full_request_ns.clear()
+        self._fleet_poll_index = 0
+        super().connect_serial(port, baud, robot_id)
+
+    def _next_poll_robot_id(self):
         candidates = self.robots.discovered_robots
         if candidates:
-            robot_id = candidates[self._fleet_poll_index % len(candidates)].robot_id
+            return candidates[self._fleet_poll_index % len(candidates)].robot_id
+        return self.state.robot_id
+
+    def _telemetry_flags_for_next_request(self, now_ns):
+        if not self.profile.split_telemetry:
+            return Protocol.TELEMETRY_FLAGS_FULL
+        robot_id = self._next_poll_robot_id()
+        full_period_ns = round(1_000_000_000 / self.profile.telemetry_full_hz)
+        last_full_ns = self._last_full_request_ns.get(robot_id)
+        if last_full_ns is None or now_ns - last_full_ns >= full_period_ns:
+            return Protocol.TELEMETRY_FLAGS_FULL
+        return Protocol.TELEMETRY_FLAGS_FAST
+
+    def send_telemetry_request(self, flags=Protocol.TELEMETRY_FLAGS_FULL):
+        if not self.is_connected: return
+        robot_id = self._next_poll_robot_id()
+        candidates = self.robots.discovered_robots
+        if candidates:
             self._fleet_poll_index = (self._fleet_poll_index + 1) % len(candidates)
-        else:
-            robot_id = self.state.robot_id
         self._request_sequence = (self._request_sequence + 1) & 0xFFFF
-        sent_at = time.monotonic(); self._telemetry_requests[self._request_sequence] = (sent_at, robot_id)
-        self._serial.write(Protocol.encode_telemetry_request(robot_id, self._request_sequence))
-        self._telemetry_requests = {seq: request for seq, request in self._telemetry_requests.items()
-                                    if sent_at - request[0] < 5.0}
+        sent_ns = time.monotonic_ns()
+        self._telemetry_requests[self._request_sequence] = {
+            "request_sequence": self._request_sequence, "robot_id": robot_id,
+            "sent_time_ns": sent_ns, "flags": flags,
+        }
+        if flags == Protocol.TELEMETRY_FLAGS_FULL:
+            self._last_full_request_ns[robot_id] = sent_ns
+        self._write_frame(Protocol.encode_telemetry_request(
+            robot_id, self._request_sequence, flags), "telemetry_request", sent_ns)
+
+    def set_radio_profile(self, profile):
+        super().set_radio_profile(profile)
+        self._telemetry_requests.clear(); self._last_full_request_ns.clear()
+
+    def _expire_telemetry_requests(self, now_ns):
+        timeout_ns = self.profile.response_timeout_ms * 1_000_000
+        expired = [sequence for sequence, request in self._telemetry_requests.items()
+                   if now_ns - request["sent_time_ns"] > timeout_ns]
+        for sequence in expired:
+            del self._telemetry_requests[sequence]
+            self.link_stats.record_timeout(now_ns)
 
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
         active = self.robots.active_robot
@@ -75,7 +111,7 @@ class RadioManager(SerialManager):
         sequence = self._discovery_sequence; self._discovery_generation += 1; generation = self._discovery_generation
         self._discovery_seen = set(); self._discovery_sent_at[sequence] = time.monotonic()
         try:
-            self._serial.write(Protocol.encode_discovery_request(sequence)); self.discovery_started.emit()
+            self._write_frame(Protocol.encode_discovery_request(sequence)); self.discovery_started.emit()
             QTimer.singleShot(max(1, int(timeout_ms)), lambda: self._finish_discovery(generation))
         except Exception as exc: self.error.emit(str(exc))
 
@@ -84,14 +120,14 @@ class RadioManager(SerialManager):
             super().discover_boards(port, baud); return
         self._begin_live_config("discover", 1200)
         nonce = int(time.time() * 1000) & 0xFFFFFFFF
-        self._serial.write(Protocol.encode_discovery(nonce))
+        self._write_frame(Protocol.encode_discovery(nonce))
 
     def configure_robot_id(self, port, baud, uid, robot_id):
         if not self.is_connected:
             super().configure_robot_id(port, baud, uid, robot_id); return
         try:
             target = Protocol.parse_uid(uid); self._begin_live_config("set-id", 1000, target=target, robot_id=robot_id)
-            self._serial.write(Protocol.encode_set_id(target, robot_id))
+            self._write_frame(Protocol.encode_set_id(target, robot_id))
         except Exception as exc: self._finish_live_config_error(str(exc))
 
     def configure_motion(self, port, baud, uid, linear_accel, angular_accel):
@@ -100,7 +136,7 @@ class RadioManager(SerialManager):
         try:
             target = Protocol.parse_uid(uid); self._begin_live_config("set-motion", 1000, target=target,
                                                                      linear=linear_accel, angular=angular_accel)
-            self._serial.write(Protocol.encode_motion_config(target, linear_accel, angular_accel))
+            self._write_frame(Protocol.encode_motion_config(target, linear_accel, angular_accel))
         except Exception as exc: self._finish_live_config_error(str(exc))
 
     def _begin_live_config(self, action, timeout_ms, **context):
@@ -134,6 +170,7 @@ class RadioManager(SerialManager):
         self.discovery_finished.emit(self.robots.discovered_robots)
 
     def _consume_rx(self, now):
+        now_ns = self._as_ns(now); now_s = now_ns / 1_000_000_000
         frames_processed = 0
         while frames_processed < self.MAX_FRAMES_PER_TICK:
             start = self._rx.find(b"\x55\xAA")
@@ -172,7 +209,7 @@ class RadioManager(SerialManager):
                 if not data: continue
                 sent_at = self._discovery_sent_at.get(data["request_sequence"])
                 if sent_at is None: continue
-                latency = max(0, int((now - sent_at) * 1000)); self._discovery_seen.add(data["robot_id"])
+                latency = max(0, int((now_s - sent_at) * 1000)); self._discovery_seen.add(data["robot_id"])
                 self.robots.handle_discovery_response(data, latency)
             elif packet_type in (Protocol.CONFIG_DISCOVER_RESPONSE_TYPE,
                                   Protocol.CONFIG_SET_ID_RESPONSE_TYPE,
@@ -188,10 +225,13 @@ class RadioManager(SerialManager):
                 response_robot_id = chr(frame[4]) if len(frame) > 4 else ""
                 data = Protocol.parse_telemetry(bytearray(frame), response_robot_id)
                 if not data: continue
-                request = self._telemetry_requests.pop(data["request_sequence"], None)
-                if request is None or request[1] != data["robot_id"]: continue
-                data["latency_ms"] = max(0, int((now - request[0]) * 1000))
-                self._last_telemetry = now; self._lost_emitted = False
+                request = self._telemetry_requests.get(data["request_sequence"])
+                if request is None or request["robot_id"] != data["robot_id"]:
+                    self.link_stats.record_unmatched(); continue
+                del self._telemetry_requests[data["request_sequence"]]
+                data["latency_ms"] = max(0.0, (now_ns - request["sent_time_ns"]) / 1_000_000)
+                self.link_stats.record_response(now_ns, data["latency_ms"])
+                self._last_telemetry = now_s; self._lost_emitted = False
                 if data["robot_id"] == self.state.robot_id: self.state.apply_telemetry(data)
                 self.history.append(data); self.telemetry_received.emit(data)
 

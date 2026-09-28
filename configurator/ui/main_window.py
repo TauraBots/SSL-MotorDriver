@@ -10,7 +10,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
-from core import RadioManager, telemetry_csv_row
+from core import RADIO_PROFILES, RadioManager, telemetry_csv_row
 from core.telemetry import CSV_HEADER
 from .analysis_panel import AnalysisPanel
 from .config_panel import ConfigPanel
@@ -21,18 +21,23 @@ from .fleet_panel import FleetPanel
 from .telemetry_panel import TelemetryPanel
 from .widgets import HeaderStatusItem
 
+SERIAL_BAUD_OPTIONS = (9600, 115200, 921600, 1000000)
+
 
 class MainWindow(QMainWindow):
     plots_ready = Signal(str)
 
     def __init__(self, args, parent=None):
         super().__init__(parent); self.args = args; self.manager = RadioManager(self); self.pressed_keys = set(); self.discovered_boards = []
-        self.log_file = self.log_writer = None; self.config_busy = False; self._last_target_warning = 0.0
+        self.log_file = self.log_writer = None; self.link_log_file = self.link_log_writer = None
+        self._last_link_log_ns = 0; self.config_busy = False; self._last_target_warning = 0.0
         self.setWindowTitle("TAURABOTS - Ground Control Center"); self.resize(1120, 740); self.setMinimumSize(920, 640)
         icon_dir = Path(__file__).parent / "assets" / "icons"
         self.setWindowIcon(QIcon(str(icon_dir / "icon-white.svg")))
         theme = Path(__file__).parents[1] / "styles" / "theme.qss"; self.setStyleSheet(theme.read_text(encoding="utf-8"))
         self._build(); self._connect_signals(); self.refresh_ports(); QApplication.instance().installEventFilter(self)
+        self._link_ui_timer = QTimer(self); self._link_ui_timer.setInterval(500)
+        self._link_ui_timer.timeout.connect(self.update_link_metrics); self._link_ui_timer.start()
 
     def _build(self):
         root = QWidget(); outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
@@ -44,9 +49,11 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         controls = QFrame(); controls.setObjectName("headerControls"); controls.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred); control_row = QHBoxLayout(controls); control_row.setContentsMargins(10, 6, 10, 6); control_row.setSpacing(7)
         self.header_port = QComboBox(); self.header_port.setEditable(False); self.header_port.setFixedWidth(120)
-        self.header_baud = QComboBox(); self.header_baud.setEditable(False); self.header_baud.addItems(["9600", "115200", "1000000"]); self.header_baud.setCurrentText(str(self.args.baud)); self.header_baud.setFixedWidth(92)
+        self.header_baud = QComboBox(); self.header_baud.setEditable(False); self.header_baud.addItems([str(value) for value in SERIAL_BAUD_OPTIONS]); self.header_baud.setCurrentText(str(self.args.baud)); self.header_baud.setFixedWidth(92)
+        self.header_profile = QComboBox(); self.header_profile.setFixedWidth(190)
+        for profile in RADIO_PROFILES: self.header_profile.addItem(profile.display_name, profile.name)
         if self.args.port: self.header_port.setCurrentText(self.args.port)
-        for label_text, widget in (("SERIAL PORT", self.header_port), ("BAUD RATE", self.header_baud)):
+        for label_text, widget in (("SERIAL PORT", self.header_port), ("BAUD RATE", self.header_baud), ("RADIO PROFILE", self.header_profile)):
             field = QVBoxLayout(); field.setContentsMargins(0, 0, 0, 0); field.setSpacing(2)
             label = QLabel(label_text); label.setObjectName("headerControlLabel"); label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             field.addWidget(label); field.addWidget(widget); control_row.addLayout(field)
@@ -79,12 +86,60 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self.header_connect.clicked.connect(self.toggle_connection); self.header_refresh.clicked.connect(self.refresh_ports)
+        self.header_profile.currentIndexChanged.connect(self.change_radio_profile)
         self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
         self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.fleet.discovery_requested.connect(self.manager.discover_robots); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
         self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(self.on_communication_error)
         self.manager.boards_discovered.connect(self.show_boards); self.manager.board_configured.connect(self.configuration_succeeded); self.manager.motion_configured.connect(self.motion_configuration_succeeded); self.manager.configuration_finished.connect(self.finish_config_action); self.plots_ready.connect(self.on_plots_ready)
         self.manager.robots.system_state_changed.connect(self.update_system_header); self.manager.robots.fleet_changed.connect(self.update_fleet); self.manager.robots.active_robot_changed.connect(self.active_robot_changed)
         self.manager.discovery_started.connect(lambda: self.fleet.set_discovering(True)); self.manager.discovery_finished.connect(self.discovery_finished)
+        self.diagnostics.metrics_log_requested.connect(self.toggle_link_metrics_log)
+
+    def change_radio_profile(self):
+        profile = RADIO_PROFILES[self.header_profile.currentIndex()]
+        self.manager.set_radio_profile(profile)
+        if profile.name != "NORMAL":
+            if not self.manager.is_connected:
+                self.header_baud.setCurrentText(str(profile.recommended_baud))
+            elif self.manager.state.baud != profile.recommended_baud:
+                QMessageBox.warning(
+                    self, "Baud rate do perfil",
+                    f"{profile.display_name} recomenda {profile.recommended_baud} baud. "
+                    f"A conexão atual permanece em {self.manager.state.baud}; reconecte manualmente para alterar.")
+        self.update_link_metrics()
+
+    def update_link_metrics(self):
+        now_ns = time.monotonic_ns(); stats = self.manager.link_stats.snapshot(now_ns)
+        self.diagnostics.update_link_stats(self.manager.profile, stats)
+        if self.link_log_writer and now_ns - self._last_link_log_ns >= 1_000_000_000:
+            self._last_link_log_ns = now_ns
+            self.link_log_writer.writerow([
+                now_ns, self.manager.profile.name, len(self.manager.robots.discovered_robots),
+                self.manager.profile.command_hz, stats.command_tx_hz,
+                self.manager.profile.telemetry_fast_hz, stats.telemetry_request_tx_hz,
+                stats.telemetry_response_rx_hz, stats.telemetry_response_loss_percent,
+                stats.latency_mean_ms, stats.latency_min_ms, stats.latency_max_ms,
+                stats.latency_p95_ms, stats.command_deadlines_missed,
+                stats.telemetry_deadlines_missed, stats.tx_bytes_per_s, stats.rx_bytes_per_s,
+            ]); self.link_log_file.flush()
+
+    def toggle_link_metrics_log(self):
+        if self.link_log_file:
+            self.link_log_file.close(); self.link_log_file = self.link_log_writer = None
+            self.diagnostics.metrics_log_button.setText("GRAVAR MÉTRICAS CSV"); return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Gravar métricas do link", "radio_link_metrics.csv", "CSV (*.csv)")
+        if not path: return
+        self.link_log_file = open(path, "w", newline="", encoding="utf-8")
+        self.link_log_writer = csv.writer(self.link_log_file)
+        self.link_log_writer.writerow([
+            "host_time_ns", "profile", "robot_count", "command_target_hz", "command_actual_hz",
+            "telemetry_target_hz", "telemetry_request_actual_hz", "telemetry_response_actual_hz",
+            "telemetry_response_loss_percent", "latency_mean_ms", "latency_min_ms", "latency_max_ms",
+            "latency_p95_ms", "command_deadlines_missed", "telemetry_deadlines_missed",
+            "tx_bytes_per_s", "rx_bytes_per_s",
+        ])
+        self._last_link_log_ns = 0; self.diagnostics.metrics_log_button.setText("PARAR MÉTRICAS CSV")
 
     def navigate(self, index):
         self.stack.setCurrentIndex(index)
@@ -292,4 +347,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.manager.disconnect_serial()
         if self.log_file: self.log_file.close()
+        if self.link_log_file: self.link_log_file.close()
         event.accept()
