@@ -97,6 +97,11 @@
 // Allow Wi-Fi retransmissions without relaxing the movement watchdog above.
 #define WEB_SOCKET_SEND_TIMEOUT_MS 250
 
+/* Event-driven WebSocket telemetry buffering. At 120 Hz, 32 samples cover
+ * approximately 267 ms. Keep HTTPD work bounded to avoid starving its task. */
+#define WEB_TELEMETRY_QUEUE_DEPTH 32
+#define WEB_TELEMETRY_MAX_BATCH 8
+
 // TX POWER is the ESP32 transmit level; RSSI is the AP signal received by it.
 #define WIFI_TX_POWER_DBM 20
 #define WIFI_TX_POWER_QUARTER_DBM (WIFI_TX_POWER_DBM * 4)

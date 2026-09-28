@@ -15,8 +15,9 @@
 
 #elif TAURA_SERIAL_PROFILE == TAURA_SERIAL_PROFILE_VALIDATION_120
 
-/* Experimental timing for kinematic validation at approximately 120 Hz. */
-#define SERIAL_TELEMETRY_MIN_INTERVAL_MS 8U
+/* 120 Hz is ~8.33 ms; allow margin for 1 ms turnaround and HAL tick quantization.
+ * The E0 requests from the ESP32 still limit telemetry to 120 Hz. */
+#define SERIAL_TELEMETRY_MIN_INTERVAL_MS 6U
 #define SERIAL_TELEMETRY_TURNAROUND_MS 1U
 
 #else

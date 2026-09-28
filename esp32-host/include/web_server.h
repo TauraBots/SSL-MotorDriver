@@ -33,6 +33,7 @@ typedef struct
     uint32_t telemetry_broadcasts;
     uint32_t telemetry_client_frames;
     uint32_t telemetry_dropped;
+    uint32_t telemetry_no_client;
 } web_server_stats_t;
 
 // ============================================================

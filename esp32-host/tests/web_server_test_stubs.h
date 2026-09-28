@@ -11,6 +11,7 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <sys/types.h>
 
 static const unsigned char web_index_html[] = "<html>";
@@ -36,9 +37,45 @@ typedef int esp_err_t;
 #define HTTPD_WS_TYPE_PONG 10
 #define portMUX_INITIALIZER_UNLOCKED 0
 #define pdPASS 1
+#define pdTRUE 1
+#define pdFALSE 0
 #define pdMS_TO_TICKS(ms) (ms)
 typedef int portMUX_TYPE;
 typedef unsigned int TickType_t;
+typedef unsigned int UBaseType_t;
+typedef struct {
+    size_t capacity, item_size, head, count;
+    unsigned char *storage;
+} mock_queue_t;
+typedef mock_queue_t *QueueHandle_t;
+static QueueHandle_t xQueueCreate(UBaseType_t capacity, UBaseType_t item_size) {
+    mock_queue_t *q=calloc(1,sizeof(*q));
+    if(!q) return NULL;
+    q->storage=calloc(capacity,item_size);
+    if(!q->storage) { free(q); return NULL; }
+    q->capacity=capacity; q->item_size=item_size; return q;
+}
+static int xQueueSend(QueueHandle_t q, const void *item, TickType_t wait) {
+    assert(wait==0);
+    if(q->count==q->capacity) return pdFALSE;
+    const size_t tail=(q->head+q->count)%q->capacity;
+    memcpy(q->storage+tail*q->item_size,item,q->item_size); ++q->count;
+    return pdTRUE;
+}
+static int xQueueReceive(QueueHandle_t q, void *item, TickType_t wait) {
+    assert(wait==0);
+    if(q->count==0) return pdFALSE;
+    memcpy(item,q->storage+q->head*q->item_size,q->item_size);
+    q->head=(q->head+1)%q->capacity; --q->count; return pdTRUE;
+}
+static void (*mock_queue_check_hook)(void);
+static UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q) {
+    if(mock_queue_check_hook) {
+        void (*hook)(void)=mock_queue_check_hook; mock_queue_check_hook=NULL; hook();
+    }
+    return (UBaseType_t)q->count;
+}
+static void vQueueDelete(QueueHandle_t q) { free(q->storage); free(q); }
 static int critical_depth;
 #define portENTER_CRITICAL(m) ((void)(m), ++critical_depth)
 #define portEXIT_CRITICAL(m) ((void)(m), --critical_depth)
@@ -51,12 +88,6 @@ typedef struct { bool connected; int rssi; uint8_t channel; } wifi_status_t;
 static bool wifi_sta_get_status(wifi_status_t *status) {
     *status=(wifi_status_t){.connected=true,.rssi=-61,.channel=6}; return true;
 }
-typedef void *esp_timer_handle_t;
-typedef struct { void (*callback)(void *); const char *name; } esp_timer_create_args_t;
-static esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *timer) { (void)args; *timer=(void *)2; return ESP_OK; }
-static esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period) { (void)timer; assert(period>0); return ESP_OK; }
-static esp_err_t esp_timer_stop(esp_timer_handle_t timer) { (void)timer; return ESP_OK; }
-static esp_err_t esp_timer_delete(esp_timer_handle_t timer) { (void)timer; return ESP_OK; }
 typedef void *httpd_handle_t;
 typedef enum { HTTPD_WS_CLIENT_INVALID, HTTPD_WS_CLIENT_HTTP, HTTPD_WS_CLIENT_WEBSOCKET } httpd_ws_client_info_t;
 typedef struct { int type; uint8_t *payload; size_t len; bool final; } httpd_ws_frame_t;
@@ -123,4 +154,22 @@ static esp_err_t httpd_ws_recv_frame(httpd_req_t *r, httpd_ws_frame_t *f, size_t
 static esp_err_t httpd_start(httpd_handle_t *h, httpd_config_t *cfg) { (void)cfg; *h=(void *)1;return ESP_OK; }
 static esp_err_t httpd_stop(httpd_handle_t h) { (void)h;return ESP_OK; }
 static esp_err_t httpd_register_uri_handler(httpd_handle_t h,const httpd_uri_t *u) { (void)h;(void)u;return ESP_OK; }
-static esp_err_t httpd_queue_work(httpd_handle_t h,void(*fn)(void *),void *arg) { (void)h;fn(arg);return ESP_OK; }
+static bool mock_defer_work;
+static void (*mock_pending_work)(void *);
+static void *mock_pending_arg;
+static unsigned int mock_work_requests;
+static esp_err_t httpd_queue_work(httpd_handle_t h,void(*fn)(void *),void *arg) {
+    (void)h; ++mock_work_requests;
+    if(mock_defer_work) {
+        assert(mock_pending_work==NULL);
+        mock_pending_work=fn; mock_pending_arg=arg;
+    } else {
+        fn(arg);
+    }
+    return ESP_OK;
+}
+static void run_queued_work(void) {
+    assert(mock_pending_work!=NULL);
+    void (*fn)(void *)=mock_pending_work; void *arg=mock_pending_arg;
+    mock_pending_work=NULL; mock_pending_arg=NULL; fn(arg);
+}
