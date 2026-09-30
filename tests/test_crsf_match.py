@@ -1,4 +1,5 @@
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from crsf_match import (  # noqa: E402
     quantize_signed,
     unpack_channels,
 )
-from crsf_bridge import CommandSource, build_arg_parser  # noqa: E402
+from crsf_bridge import CommandSource, JsonCommandSource, build_arg_parser, send_safe_shutdown  # noqa: E402
 
 
 class CrsfMatchTests(unittest.TestCase):
@@ -117,6 +118,58 @@ class CrsfMatchTests(unittest.TestCase):
         active = parse_rc_channels_stream(bytearray(source.active_frame()))[0]
         self.assertLessEqual(safe[15], CRSF_CHANNEL_CENTER)
         self.assertGreater(active[15], CRSF_CHANNEL_CENTER)
+
+    def test_stdin_without_newline_does_not_block_transmission(self):
+        class BlockingStream:
+            def readline(self):
+                time.sleep(1.0)
+                return ""
+
+        args = build_arg_parser().parse_args([
+            "--port", "dummy", "--stdin-json", "--enable", "--command-timeout-ms", "100"
+        ])
+        source = JsonCommandSource(args, BlockingStream())
+        start = time.perf_counter()
+        frame = source.active_frame()
+        elapsed = time.perf_counter() - start
+        channels = parse_rc_channels_stream(bytearray(frame))[0]
+        self.assertLess(elapsed, 0.05)
+        self.assertLessEqual(channels[15], CRSF_CHANNEL_CENTER)
+
+    def test_stdin_timeout_disables_ch16_and_keeps_latest_before_timeout(self):
+        args = build_arg_parser().parse_args([
+            "--port", "dummy", "--stdin-json", "--enable", "--command-timeout-ms", "100"
+        ])
+        source = JsonCommandSource(args, sys.stdin)
+        source.updates.put({"A": RobotCommand(vx=1.0), "B": RobotCommand(), "C": RobotCommand()})
+        active = parse_rc_channels_stream(bytearray(source.active_frame()))[0]
+        self.assertGreater(active[15], CRSF_CHANNEL_CENTER)
+
+        source.last_update = time.perf_counter() - 0.2
+        expired = parse_rc_channels_stream(bytearray(source.active_frame()))[0]
+        self.assertLessEqual(expired[15], CRSF_CHANNEL_CENTER)
+
+    def test_shutdown_sends_multiple_safe_frames(self):
+        class FakeSerial:
+            def __init__(self):
+                self.frames = []
+                self.flushed = False
+
+            def write(self, data):
+                self.frames.append(bytes(data))
+
+            def flush(self):
+                self.flushed = True
+
+        args = build_arg_parser().parse_args(["--port", "dummy", "--test"])
+        source = CommandSource(args)
+        serial = FakeSerial()
+        send_safe_shutdown(serial, source, 20)
+        self.assertEqual(len(serial.frames), 20)
+        self.assertTrue(serial.flushed)
+        for frame in serial.frames:
+            channels = parse_rc_channels_stream(bytearray(frame))[0]
+            self.assertLessEqual(channels[15], CRSF_CHANNEL_CENTER)
 
 
 class TeamFrameTests(unittest.TestCase):

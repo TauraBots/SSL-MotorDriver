@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import signal
 import sys
+import threading
 import time
-from pathlib import Path
 from typing import TextIO
 
 from crsf_match import RobotCommand, encode_rc_channels_frame, encode_team_channels
@@ -17,6 +18,8 @@ from crsf_match import RobotCommand, encode_rc_channels_frame, encode_team_chann
 DEFAULT_BRIDGE_BAUD = 921600
 DEFAULT_RATE_HZ = 333.0
 STARTUP_SAFE_SECONDS = 0.25
+HOST_COMMAND_TIMEOUT_MS = 100
+SAFE_SHUTDOWN_FRAMES = 20
 
 
 def test_commands() -> dict[str, RobotCommand]:
@@ -28,7 +31,11 @@ def test_commands() -> dict[str, RobotCommand]:
 
 
 def disabled_commands() -> dict[str, RobotCommand]:
-    return {"A": RobotCommand(), "B": RobotCommand(), "C": RobotCommand()}
+    return {
+        "A": RobotCommand(brake=True),
+        "B": RobotCommand(brake=True),
+        "C": RobotCommand(brake=True),
+    }
 
 
 def load_json_commands(line: str) -> dict[str, RobotCommand]:
@@ -72,14 +79,41 @@ class JsonCommandSource(CommandSource):
     def __init__(self, args: argparse.Namespace, stream: TextIO) -> None:
         super().__init__(args)
         self.stream = stream
+        self.last_update = 0.0
+        self.updates: queue.Queue[dict[str, RobotCommand]] = queue.Queue()
+        self.reader = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader.start()
+
+    def _reader_loop(self) -> None:
+        while True:
+            line = self.stream.readline()
+            if line == "":
+                return
+            try:
+                self.updates.put(load_json_commands(line))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                print(f"ignoring invalid JSON command: {exc}", file=sys.stderr)
+
+    def _consume_updates(self) -> None:
+        latest = None
+        while True:
+            try:
+                latest = self.updates.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self.current = latest
+            self.enabled = bool(self.args.enable)
+            self.last_update = time.perf_counter()
 
     def active_frame(self) -> bytes:
         if self.args.disable:
             return super().active_frame()
-        line = self.stream.readline()
-        if line:
-            self.current = load_json_commands(line)
-            self.enabled = bool(self.args.enable)
+        self._consume_updates()
+        timeout_s = max(0.0, self.args.command_timeout_ms / 1000.0)
+        if self.last_update <= 0.0 or (time.perf_counter() - self.last_update) > timeout_s:
+            self.current = disabled_commands()
+            self.enabled = False
         return encode_rc_channels_frame(encode_team_channels(self.current, enabled=self.enabled))
 
 
@@ -91,7 +125,15 @@ def open_serial(port: str, baud: int):
     return serial.Serial(port=port, baudrate=baud, bytesize=8, parity="N", stopbits=1, timeout=0)
 
 
-def transmit_loop(serial_port, source: CommandSource, rate_hz: float, startup_safe_seconds: float) -> None:
+def send_safe_shutdown(serial_port, source: CommandSource, frames: int) -> None:
+    safe = source.startup_safe_frame()
+    for _ in range(max(0, frames)):
+        serial_port.write(safe)
+    serial_port.flush()
+
+
+def transmit_loop(serial_port, source: CommandSource, rate_hz: float,
+                  startup_safe_seconds: float, shutdown_safe_frames: int) -> None:
     period = 1.0 / rate_hz
     running = True
 
@@ -102,24 +144,24 @@ def transmit_loop(serial_port, source: CommandSource, rate_hz: float, startup_sa
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    start = time.perf_counter()
-    next_tick = start
-    while running:
-        now = time.perf_counter()
-        if now < next_tick:
-            time.sleep(min(next_tick - now, period / 2.0))
-            continue
-        if now - start < startup_safe_seconds:
-            frame = source.startup_safe_frame()
-        else:
-            frame = source.active_frame()
-        serial_port.write(frame)
-        next_tick += period
-        if next_tick < now - period:
-            next_tick = now + period
-
-    serial_port.write(source.startup_safe_frame())
-    serial_port.flush()
+    try:
+        start = time.perf_counter()
+        next_tick = start
+        while running:
+            now = time.perf_counter()
+            if now < next_tick:
+                time.sleep(min(next_tick - now, period / 2.0))
+                continue
+            if now - start < startup_safe_seconds:
+                frame = source.startup_safe_frame()
+            else:
+                frame = source.active_frame()
+            serial_port.write(frame)
+            next_tick += period
+            if next_tick < now - period:
+                next_tick = now + period
+    finally:
+        send_safe_shutdown(serial_port, source, shutdown_safe_frames)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -139,6 +181,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Enable CH16 for --stdin-json commands after startup safe frames")
     parser.add_argument("--startup-safe-seconds", type=float, default=STARTUP_SAFE_SECONDS,
                         help=f"Seconds to transmit CH16 disabled on startup (default: {STARTUP_SAFE_SECONDS})")
+    parser.add_argument("--command-timeout-ms", type=int, default=HOST_COMMAND_TIMEOUT_MS,
+                        help=f"Disable CH16 if --stdin-json has no valid update within this timeout (default: {HOST_COMMAND_TIMEOUT_MS})")
+    parser.add_argument("--shutdown-safe-frames", type=int, default=SAFE_SHUTDOWN_FRAMES,
+                        help=f"Number of CH16-disabled frames to send before closing serial (default: {SAFE_SHUTDOWN_FRAMES})")
     return parser
 
 
@@ -148,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--rate must be positive")
     if args.disable and args.test:
         raise SystemExit("--disable and --test are mutually exclusive")
+    if args.command_timeout_ms < 0:
+        raise SystemExit("--command-timeout-ms must be non-negative")
 
     source: CommandSource
     if args.stdin_json:
@@ -156,10 +204,10 @@ def main(argv: list[str] | None = None) -> int:
         source = CommandSource(args)
 
     with open_serial(args.port, args.baud) as serial_port:
-        transmit_loop(serial_port, source, args.rate, max(0.0, args.startup_safe_seconds))
+        transmit_loop(serial_port, source, args.rate, max(0.0, args.startup_safe_seconds),
+                      args.shutdown_safe_frames)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

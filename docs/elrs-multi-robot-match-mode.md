@@ -262,7 +262,12 @@ python crsf-host/crsf_bridge.py --port /dev/ttyUSB0 --baud 921600 --disable
 ```
 
 `--rate` controla a frequencia do loop de envio; o default e `333` frames/s e o
-loop usa `time.perf_counter()` para reduzir deriva.
+loop usa `time.perf_counter()` para reduzir deriva. Com `--stdin-json`, a leitura
+de stdin roda separada do loop CRSF; o bridge continua transmitindo o ultimo
+comando valido enquanto aguarda nova entrada. Se nenhum JSON valido chegar antes
+de `--command-timeout-ms` (default `100`), o bridge desliga `CH16` e envia os
+tres robos parados com brake. Ao encerrar, o bridge envia `--shutdown-safe-frames`
+frames seguros (default `20`) antes de fechar a serial.
 
 ## Pontos que exigem teste fisico
 

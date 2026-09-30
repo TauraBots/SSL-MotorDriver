@@ -637,6 +637,11 @@ static void Serial_UartRecoveryTask(void)
   (void)HAL_UART_Abort(serial_uart);
   __HAL_UART_CLEAR_OREFLAG(serial_uart);
   uart_rx_last_pos = 0U;
+  if (serial_comm_mode == COMM_MODE_MATCH)
+  {
+    CrsfParser_Init(&crsf_parser);
+    MatchControl_Init();
+  }
   if (HAL_UART_Receive_DMA(serial_uart, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE) == HAL_OK)
   {
     __HAL_DMA_DISABLE_IT(serial_rx_dma, DMA_IT_HT);

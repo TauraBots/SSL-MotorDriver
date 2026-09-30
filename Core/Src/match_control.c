@@ -98,6 +98,7 @@ void MatchControl_Init(void)
   memset(last_action_bits, 0, sizeof(last_action_bits));
   memset(last_action_valid, 0, sizeof(last_action_valid));
   memset(&stats, 0, sizeof(stats));
+  AppC_ForceSafeState();
 }
 
 void MatchControl_HandleChannels(const CrsfChannels *channels)
@@ -126,6 +127,12 @@ void MatchControl_HandleChannels(const CrsfChannels *channels)
 
 void MatchControl_Task(void)
 {
+  if (has_match_command == 0U)
+  {
+    AppC_ForceSafeState();
+    return;
+  }
+
   if ((has_match_command != 0U) &&
       ((HAL_GetTick() - last_command_tick) >= MATCH_COMMAND_TIMEOUT_MS))
   {
