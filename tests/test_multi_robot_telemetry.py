@@ -68,6 +68,24 @@ class MultiRobotTelemetryTests(unittest.TestCase):
         self.assertEqual(self.radio.robots.system_state.active_robot_id, "B")
         self.assertEqual(self.radio.state.robot_id, "B")
 
+    def test_manual_expected_robots_are_polled_without_discovery(self):
+        radio = RadioManager(); radio._serial = FakeSerial(); radio.state.robot_id = "A"
+        radio.robots.register_expected_robots(["A", "B"])
+        self.assertEqual([robot.robot_id for robot in radio.robots.discovered_robots], ["A", "B"])
+        self.assertEqual([robot.connected for robot in radio.robots.discovered_robots], [False, False])
+        self.assertEqual([robot.can_control for robot in radio.robots.discovered_robots], [True, True])
+        radio.send_telemetry_request(); radio.send_telemetry_request()
+        targets = [chr(frame[4]) for frame in radio._serial.frames]
+        self.assertEqual(targets, ["A", "B"])
+
+    def test_manual_expected_robot_accepts_commands_without_telemetry(self):
+        radio = RadioManager(); radio._serial = FakeSerial(); radio.state.connected = True
+        radio.robots.register_expected_robots(["A"]); radio.select_robot("A")
+        radio.send_command(0.3, 0.0, 0.0)
+        frame = radio._serial.frames[-1]
+        self.assertEqual(frame[2], Protocol.ROBOT_VELOCITY_TYPE)
+        self.assertEqual(chr(frame[4]), "A")
+
 
 if __name__ == "__main__":
     unittest.main()

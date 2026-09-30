@@ -43,8 +43,8 @@ class FleetPanel(QWidget):
                                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         self.cards = [self._cards_by_id[robot.robot_id] for robot in robots]
-        online = sum(robot.connected for robot in robots)
-        self.summary.setText(f"{online} ONLINE / {len(robots)} REGISTERED")
+        telemetry = sum(robot.connected for robot in robots)
+        self.summary.setText(f"{telemetry} TELEMETRY / {len(robots)} REGISTERED")
         self.grid.setRowStretch((len(robots) + 2) // 3, 1)
 
     def set_discovering(self, discovering):

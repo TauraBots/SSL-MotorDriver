@@ -93,7 +93,7 @@ class RadioManager(SerialManager):
 
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
         active = self.robots.active_robot
-        if active is None or not active.connected:
+        if active is None or not active.can_control:
             return
         self.state.robot_id = active.robot_id
         super().send_command(vx, vy, omega, kick_power, brake)

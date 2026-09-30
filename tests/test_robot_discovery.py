@@ -75,7 +75,8 @@ class RobotDiscoveryTests(unittest.TestCase):
         robots = {robot.robot_id: robot for robot in self.manager.discovered_robots}
         self.assertTrue(robots["A"].connected)
         self.assertFalse(robots["B"].connected)
-        self.assertEqual(robots["B"].status, "OFFLINE")
+        self.assertEqual(robots["B"].status, "NO TELEMETRY")
+        self.assertTrue(robots["B"].can_control)
         self.assertEqual(self.manager.system_state.online_robot_count, 1)
 
     def test_missed_discovery_reply_does_not_drop_recent_robot_or_selection(self):

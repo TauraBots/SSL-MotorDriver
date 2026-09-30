@@ -264,6 +264,8 @@ def parse_args():
     app = actions.add_parser("app", help="Open the graphical configurator")
     app.add_argument("--port", help="Initial serial port")
     app.add_argument("--baud", type=int, default=9600)
+    app.add_argument("--fleet-ids", default="",
+                     help="Manual robot IDs to poll without relying on discovery, for example A,B")
 
     drive = actions.add_parser("drive", help="Drive one robot with live telemetry")
     drive.add_argument("--port", required=True, help="Serial port, for example COM3")

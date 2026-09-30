@@ -29,6 +29,21 @@ class RobotManager(QObject):
         if robot_id not in self._robots: self._robots[robot_id] = RobotState(robot_id=robot_id)
         return self._robots[robot_id]
 
+    @staticmethod
+    def _mark_no_telemetry(robot):
+        robot.connected = False
+        robot.status = "PENDING" if robot.last_seen is None else "NO TELEMETRY"
+
+    def register_expected_robots(self, robot_ids):
+        for robot_id in robot_ids:
+            if len(robot_id) != 1 or not ("A" <= robot_id <= "Z"):
+                raise ValueError("Robot IDs devem ser letras A-Z")
+            robot = self.ensure_robot(robot_id)
+            robot.discovered = True
+            if not robot.connected:
+                robot.status = "PENDING"
+        self._refresh_system(); self.fleet_changed.emit(self.discovered_robots)
+
     def set_radio_connected(self, connected, robot_id=None, port="", baud=0):
         self.system_state.radio_connected = connected
         if robot_id:
@@ -79,15 +94,15 @@ class RobotManager(QObject):
         for robot in self._robots.values():
             stale = robot.last_seen is None or now - robot.last_seen > timeout_s
             if robot.discovered and robot.robot_id not in seen_robot_ids and stale:
-                robot.connected = False; robot.status = "OFFLINE"
+                self._mark_no_telemetry(robot)
         active = self.active_robot
         if active is not None and not active.connected:
-            self.system_state.active_robot_id = None; self.active_robot_changed.emit(None)
+            self.active_robot_changed.emit(active)
         self._refresh_system(); self.fleet_changed.emit(self.discovered_robots)
 
     def mark_active_lost(self):
         robot = self.active_robot
-        if robot: robot.connected = False; robot.status = "OFFLINE"
+        if robot: self._mark_no_telemetry(robot)
         self._refresh_system(); self.fleet_changed.emit(self.robots)
 
     def expire_stale(self, timeout_s=1.5, now=None):
@@ -95,11 +110,11 @@ class RobotManager(QObject):
         for robot in self._robots.values():
             if (robot.discovered and robot.connected and robot.last_seen is not None and
                     now - robot.last_seen > timeout_s):
-                robot.connected = False; robot.status = "OFFLINE"; changed = True
+                self._mark_no_telemetry(robot); changed = True
         if changed:
             active = self.active_robot
             if active is not None and not active.connected:
-                self.system_state.active_robot_id = None; self.active_robot_changed.emit(None)
+                self.active_robot_changed.emit(active)
             self._refresh_system(); self.fleet_changed.emit(self.discovered_robots)
 
     def select_robot(self, robot_id):
