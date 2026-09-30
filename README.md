@@ -7,7 +7,7 @@ O projeto usa STM32CubeIDE/HAL e implementa:
 - controle fechado de velocidade para 4 rodas
 - leitura de encoder em hardware
 - PWM de 30 kHz para ponte H
-- telemetria binaria via `USART2`
+- telemetria binaria via `USART2` no modo bench
 - conversao de velocidades do robo para velocidades das rodas
 - leitura da tensao de bateria por `ADC1`
 
@@ -15,7 +15,7 @@ Hardware configurado no CubeMX:
 
 - `STM32F103RCTx` em `LQFP64`
 - `HSE 8 MHz` com `SYSCLK 72 MHz`
-- `USART2` em `1 Mbps`
+- `USART2` em `PA2/PA3`: `9600` baud no bench/AirPort, `420000` baud no match/CRSF
 - `TIM1/TIM8` para PWM
 - `TIM2/TIM3/TIM4/TIM5` para encoder
 
@@ -35,6 +35,15 @@ Arquivos principais:
 ## Build
 
 Abra o `.ioc` ou o projeto no STM32CubeIDE e compile a configuracao `Debug`.
+
+Perfis de firmware:
+
+- `quadmd_bench`: build padrao, `TAURA_COMM_MODE=COMM_MODE_BENCH`, USART2 `9600`, AirPort, `D0/E0/E1`.
+- `quadmd_match`: adicionar os simbolos de compilacao
+  `TAURA_COMM_MODE=COMM_MODE_MATCH` e
+  `TAURA_MATCH_TRANSPORT=MATCH_TRANSPORT_CHANNELS`, USART2 `420000`, CRSF.
+
+Detalhes do modo de partida: [ELRS multi-robot match mode](docs/elrs-multi-robot-match-mode.md).
 
 ## SSL Configurator
 

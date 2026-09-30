@@ -18,7 +18,7 @@ static uint16_t Crsf_ClampChannel(uint16_t channel)
 
 static uint8_t Crsf_IsValidAddress(uint8_t address)
 {
-  return ((address == CRSF_ADDRESS_FLIGHT_CONTROLLER) ||
+  return ((address == CRSF_RX_TO_STM32_SYNC_ADDRESS) ||
           (address == CRSF_ADDRESS_CRSF_RECEIVER)) ? 1U : 0U;
 }
 

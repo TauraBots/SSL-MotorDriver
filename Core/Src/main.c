@@ -35,6 +35,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define USART2_CONFIGURED_BAUD \
+  ((TAURA_COMM_MODE == COMM_MODE_MATCH) ? MATCH_CRSF_UART_BAUD : BENCH_UART_BAUD)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -686,7 +688,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
+  huart2.Init.BaudRate = USART2_CONFIGURED_BAUD;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;

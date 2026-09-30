@@ -7,8 +7,12 @@
 extern "C" {
 #endif
 
-#define CRSF_ADDRESS_FLIGHT_CONTROLLER 0xC8U
-#define CRSF_ADDRESS_CRSF_RECEIVER     0xECU
+#define CRSF_SYNC_BYTE                         0xC8U
+#define CRSF_ADDRESS_FLIGHT_CONTROLLER         0xC8U
+#define CRSF_ADDRESS_CRSF_RECEIVER             0xECU
+#define CRSF_ADDRESS_CRSF_TRANSMITTER          0xEEU
+#define CRSF_RX_TO_STM32_SYNC_ADDRESS          CRSF_SYNC_BYTE
+#define CRSF_HOST_TO_TX_MODULE_ADDRESS         CRSF_ADDRESS_CRSF_TRANSMITTER
 #define CRSF_TYPE_RC_CHANNELS_PACKED   0x16U
 #define CRSF_RC_CHANNEL_COUNT          16U
 #define CRSF_RC_CHANNEL_MIN            172U
@@ -52,4 +56,3 @@ uint16_t Crsf_QuantizeSigned(float value, float max_abs_value);
 #ifdef __cplusplus
 }
 #endif
-

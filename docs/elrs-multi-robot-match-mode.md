@@ -45,9 +45,42 @@ Para firmware de partida, compilar com:
 #define TAURA_MATCH_TRANSPORT MATCH_TRANSPORT_CHANNELS
 ```
 
+Os bauds da `USART2` sao escolhidos automaticamente por `TAURA_COMM_MODE`:
+
+```text
+quadmd_bench: USART2 = 9600 baud, 8N1
+quadmd_match: USART2 = 420000 baud, 8N1
+```
+
 Nao houve alteracao de pinagem. A placa documentada possui `USART2` em
 `PA2/PA3` com DMA; nenhum segundo UART foi configurado sem conflito no `.ioc`.
 Assim, bench e match sao modos alternativos sobre a UART existente.
+
+## Build profiles
+
+O codigo nao exige editar `main.c` entre bench e match. Use dois perfis no
+STM32CubeIDE, ou equivalentes no sistema de build:
+
+```text
+quadmd_bench
+  symbols:
+    USE_HAL_DRIVER
+    STM32F103xE
+  optional/default:
+    TAURA_COMM_MODE=COMM_MODE_BENCH
+
+quadmd_match
+  symbols:
+    USE_HAL_DRIVER
+    STM32F103xE
+    TAURA_COMM_MODE=COMM_MODE_MATCH
+    TAURA_MATCH_TRANSPORT=MATCH_TRANSPORT_CHANNELS
+```
+
+Em STM32CubeIDE: Project Properties -> C/C++ Build -> Settings -> MCU GCC
+Compiler -> Preprocessor, duplique a configuracao existente e adicione os
+simbolos acima ao perfil `quadmd_match`. Repita tambem no MCU G++ Compiler para
+os arquivos C++.
 
 ## 333 Full / 16ch Rate/2
 
@@ -154,6 +187,21 @@ Frames invalidos ou truncados sao descartados sem atualizar comandos
 parcialmente. Bytes aleatorios antes do frame sao ignorados por ressincronizacao
 baseada no campo de tamanho.
 
+Enderecos/sync usados:
+
+```text
+HOST bridge -> ELRS TX module:
+  first byte = 0xEE (CRSF transmitter address)
+  baud inicial = 921600, configuravel no host com --baud
+
+ELRS RX -> STM32:
+  first byte/sync = 0xC8
+  baud = 420000 em quadmd_match
+```
+
+O parser do STM32 aceita `RC_CHANNELS_PACKED` vindo do RX ExpressLRS pela UART
+CRSF. O host gera `RC_CHANNELS_PACKED` para o modulo TX usando o endereco de TX.
+
 ## TeamFrame experimental
 
 A arquitetura ja reserva o backend:
@@ -190,6 +238,31 @@ errado descartam o frame.
 - validar o assembler experimental de TeamFrame.
 
 Esse modulo nao usa nem altera o protocolo Quad-MD existente.
+
+Para o primeiro teste sem ROS2:
+
+```bash
+python -m pip install -r crsf-host/requirements.txt
+python crsf-host/crsf_bridge.py --port /dev/ttyUSB0 --baud 921600 --test
+```
+
+O bridge sempre inicia transmitindo `CH16` desligado por um curto intervalo. No
+modo `--test`, depois desse intervalo ele envia:
+
+```text
+Robot A: vx = +1.0, vy = 0, omega = 0
+Robot B: vx = 0, vy = +1.0, omega = 0
+Robot C: vx = 0, vy = 0, omega = +1.0
+```
+
+Para manter/parar todos os robos com enable global desligado:
+
+```bash
+python crsf-host/crsf_bridge.py --port /dev/ttyUSB0 --baud 921600 --disable
+```
+
+`--rate` controla a frequencia do loop de envio; o default e `333` frames/s e o
+loop usa `time.perf_counter()` para reduzir deriva.
 
 ## Pontos que exigem teste fisico
 

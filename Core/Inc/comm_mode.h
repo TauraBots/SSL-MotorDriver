@@ -8,6 +8,9 @@ typedef enum
   COMM_MODE_MATCH = 1
 } CommMode;
 
+#define BENCH_UART_BAUD 9600U
+#define MATCH_CRSF_UART_BAUD 420000U
+
 #ifndef TAURA_COMM_MODE
 #define TAURA_COMM_MODE COMM_MODE_BENCH
 #endif
@@ -21,4 +24,3 @@ typedef enum
 #ifndef TAURA_MATCH_TRANSPORT
 #define TAURA_MATCH_TRANSPORT MATCH_TRANSPORT_CHANNELS
 #endif
-

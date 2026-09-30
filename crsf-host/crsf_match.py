@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 
+CRSF_SYNC_BYTE = 0xC8
 CRSF_ADDRESS_FLIGHT_CONTROLLER = 0xC8
+CRSF_ADDRESS_CRSF_RECEIVER = 0xEC
+CRSF_ADDRESS_CRSF_TRANSMITTER = 0xEE
+CRSF_RX_TO_STM32_SYNC_ADDRESS = CRSF_SYNC_BYTE
+CRSF_HOST_TO_TX_MODULE_ADDRESS = CRSF_ADDRESS_CRSF_TRANSMITTER
 CRSF_TYPE_RC_CHANNELS_PACKED = 0x16
 CRSF_CHANNEL_COUNT = 16
 CRSF_CHANNEL_MIN = 172
@@ -116,17 +121,17 @@ def unpack_channels(payload: bytes) -> List[int]:
     return channels
 
 
-def encode_rc_channels_frame(channels: Iterable[int]) -> bytes:
+def encode_rc_channels_frame(channels: Iterable[int], address: int = CRSF_HOST_TO_TX_MODULE_ADDRESS) -> bytes:
     payload = bytes([CRSF_TYPE_RC_CHANNELS_PACKED]) + pack_channels(channels)
     length = len(payload) + 1
-    frame = bytes([CRSF_ADDRESS_FLIGHT_CONTROLLER, length]) + payload
+    frame = bytes([address & 0xFF, length]) + payload
     return frame + bytes([crc8_dvb_s2(payload)])
 
 
 def parse_rc_channels_stream(buffer: bytearray) -> List[List[int]]:
     frames = []
     while len(buffer) >= 4:
-        if buffer[0] != CRSF_ADDRESS_FLIGHT_CONTROLLER:
+        if buffer[0] not in (CRSF_HOST_TO_TX_MODULE_ADDRESS, CRSF_RX_TO_STM32_SYNC_ADDRESS, CRSF_ADDRESS_CRSF_RECEIVER):
             del buffer[0]
             continue
         length = buffer[1]

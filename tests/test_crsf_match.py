@@ -14,6 +14,8 @@ from crsf_match import (  # noqa: E402
     CRSF_CHANNEL_CENTER,
     CRSF_CHANNEL_MAX,
     CRSF_CHANNEL_MIN,
+    CRSF_HOST_TO_TX_MODULE_ADDRESS,
+    CRSF_RX_TO_STM32_SYNC_ADDRESS,
     RobotCommand,
     TeamFrameAssembler,
     TeamFrameFragment,
@@ -26,6 +28,7 @@ from crsf_match import (  # noqa: E402
     quantize_signed,
     unpack_channels,
 )
+from crsf_bridge import CommandSource, build_arg_parser  # noqa: E402
 
 
 class CrsfMatchTests(unittest.TestCase):
@@ -43,6 +46,14 @@ class CrsfMatchTests(unittest.TestCase):
         rx = bytearray(bad + frame[:6])
         self.assertEqual(parse_rc_channels_stream(rx), [])
         self.assertEqual(bytes(rx), frame[:6])
+
+    def test_directional_crsf_addresses_are_explicit(self):
+        channels = [CRSF_CHANNEL_CENTER] * 16
+        host_frame = encode_rc_channels_frame(channels)
+        rx_frame = encode_rc_channels_frame(channels, address=CRSF_RX_TO_STM32_SYNC_ADDRESS)
+        self.assertEqual(host_frame[0], CRSF_HOST_TO_TX_MODULE_ADDRESS)
+        self.assertEqual(rx_frame[0], CRSF_RX_TO_STM32_SYNC_ADDRESS)
+        self.assertEqual(len(parse_rc_channels_stream(bytearray(host_frame + rx_frame))), 2)
 
     def test_robot_mapping_allows_different_commands_and_negative_values(self):
         channels = encode_team_channels({
@@ -98,6 +109,14 @@ class CrsfMatchTests(unittest.TestCase):
         self.assertEqual(len(parsed), 1)
         channels = unpack_channels(frame[3:-1])
         self.assertEqual(parsed[0], channels)
+
+    def test_bridge_starts_disabled_before_test_enable(self):
+        args = build_arg_parser().parse_args(["--port", "dummy", "--test"])
+        source = CommandSource(args)
+        safe = parse_rc_channels_stream(bytearray(source.startup_safe_frame()))[0]
+        active = parse_rc_channels_stream(bytearray(source.active_frame()))[0]
+        self.assertLessEqual(safe[15], CRSF_CHANNEL_CENTER)
+        self.assertGreater(active[15], CRSF_CHANNEL_CENTER)
 
 
 class TeamFrameTests(unittest.TestCase):
