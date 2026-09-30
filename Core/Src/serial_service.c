@@ -1,6 +1,8 @@
 #include "serial_service.h"
 
 #include "app_c_api.h"
+#include "crsf_protocol.h"
+#include "match_control.h"
 #include "robot_identity.h"
 #include "serial_profile.h"
 #include "serial_protocol.h"
@@ -104,9 +106,13 @@ volatile float dbg_wheel_m4_rpm = 0.0f;
 
 static UART_HandleTypeDef *serial_uart = NULL;
 static DMA_HandleTypeDef *serial_rx_dma = NULL;
+static CommMode serial_comm_mode = (CommMode)TAURA_COMM_MODE;
+static CrsfParser crsf_parser;
 
 static void Serial_ProcessRx(void);
 static void Serial_ProcessByte(uint8_t b);
+static void Serial_ProcessBenchByte(uint8_t b);
+static void Serial_ProcessMatchByte(uint8_t b);
 static void Serial_ProcessCommandPacket(const uint8_t *buf);
 static void Serial_TelemetryTask(void);
 static void Serial_DiscoveryTask(void);
@@ -392,6 +398,35 @@ static void Serial_ProcessRx(void)
 }
 
 static void Serial_ProcessByte(uint8_t b)
+{
+  if (serial_comm_mode == COMM_MODE_MATCH)
+  {
+    Serial_ProcessMatchByte(b);
+  }
+  else
+  {
+    Serial_ProcessBenchByte(b);
+  }
+}
+
+static void Serial_ProcessMatchByte(uint8_t b)
+{
+  serial_dbg_rx_bytes++;
+  CrsfChannels channels;
+  const CrsfParseResult result =
+      CrsfParser_ProcessByte(&crsf_parser, b, &channels);
+  if (result == CRSF_PARSE_RC_CHANNELS)
+  {
+    serial_dbg_rx_frames++;
+    MatchControl_HandleChannels(&channels);
+  }
+  else if (result == CRSF_PARSE_BAD_CRC)
+  {
+    serial_dbg_rx_bad_crc++;
+  }
+}
+
+static void Serial_ProcessBenchByte(uint8_t b)
 {
   serial_dbg_rx_bytes++;
   static uint8_t frame[RX_FRAME_LEN_MAX];
@@ -722,6 +757,8 @@ HAL_StatusTypeDef SerialService_Init(UART_HandleTypeDef *uart,
 {
   serial_uart = uart;
   serial_rx_dma = rx_dma;
+  CrsfParser_Init(&crsf_parser);
+  MatchControl_Init();
   const HAL_StatusTypeDef status =
       HAL_UART_Receive_DMA(serial_uart, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE);
   if (status != HAL_OK)
@@ -729,8 +766,11 @@ HAL_StatusTypeDef SerialService_Init(UART_HandleTypeDef *uart,
     return status;
   }
   __HAL_DMA_DISABLE_IT(serial_rx_dma, DMA_IT_HT);
-  (void)HAL_UART_Transmit(serial_uart, (uint8_t *)"USART2 READY\r\n",
-                          strlen("USART2 READY\r\n"), 20U);
+  if (serial_comm_mode == COMM_MODE_BENCH)
+  {
+    (void)HAL_UART_Transmit(serial_uart, (uint8_t *)"USART2 READY\r\n",
+                            strlen("USART2 READY\r\n"), 20U);
+  }
   return HAL_OK;
 }
 
@@ -738,9 +778,16 @@ void SerialService_Task(void)
 {
   Serial_UartRecoveryTask();
   Serial_ProcessRx();
-  Serial_ConfigResponseTask();
-  Serial_DiscoveryTask();
-  Serial_TelemetryTask();
+  if (serial_comm_mode == COMM_MODE_MATCH)
+  {
+    MatchControl_Task();
+  }
+  else
+  {
+    Serial_ConfigResponseTask();
+    Serial_DiscoveryTask();
+    Serial_TelemetryTask();
+  }
 }
 
 void SerialService_OnTxComplete(UART_HandleTypeDef *uart)
@@ -760,4 +807,19 @@ void SerialService_OnError(UART_HandleTypeDef *uart)
     uart_tx_busy = 0U;
     uart_recovery_pending = 1U;
   }
+}
+
+void SerialService_SetCommMode(CommMode mode)
+{
+  serial_comm_mode = mode;
+  CrsfParser_Init(&crsf_parser);
+  MatchControl_Init();
+  telemetry_response_pending = 0U;
+  discovery_response_pending = 0U;
+  config_response_pending = 0U;
+}
+
+CommMode SerialService_GetCommMode(void)
+{
+  return serial_comm_mode;
 }

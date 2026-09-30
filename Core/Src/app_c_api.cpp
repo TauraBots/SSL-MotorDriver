@@ -261,13 +261,41 @@ extern "C" void AppC_SetRobotVelocity(uint32_t sequence,
                                         float vx, float vy, float omega,
                                         uint8_t kick_power, uint8_t brake_mode)
 {
+  RobotCommand command{};
+  command.vx = vx;
+  command.vy = vy;
+  command.omega = omega;
+  command.kick_power = kick_power;
+  command.kick = (kick_power > 0U) ? 1U : 0U;
+  command.chip = 0U;
+  command.brake = brake_mode;
+  command.dribbler = 0U;
+  command.enabled = 1U;
+  command.sequence = sequence;
+  AppC_ApplyRobotCommand(&command);
+}
+
+extern "C" void AppC_ApplyRobotCommand(const RobotCommand *command)
+{
+  if (command == nullptr)
+  {
+    return;
+  }
+
+  if (command->enabled == 0U)
+  {
+    EnterSafeState();
+    return;
+  }
+
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
-  if (AcceptCommandLocked(sequence, kick_power, brake_mode))
+  const uint8_t kickPower = (command->kick != 0U) ? command->kick_power : 0U;
+  if (AcceptCommandLocked(command->sequence, kickPower, command->brake))
   {
-    g_desiredVx = vx;
-    g_desiredVy = vy;
-    g_desiredOmega = omega;
+    g_desiredVx = command->vx;
+    g_desiredVy = command->vy;
+    g_desiredOmega = command->omega;
     g_cartesianCommand = 1U;
   }
   if (primask == 0U)
