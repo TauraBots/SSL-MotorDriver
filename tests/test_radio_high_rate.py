@@ -102,6 +102,22 @@ class RadioProfileAndSchedulerTests(unittest.TestCase):
         self.assertEqual([frame[2] for _, frame in serial.frames[:2]],
                          [Protocol.TEAM_VELOCITY_TYPE, Protocol.TELEMETRY_REQUEST_TYPE])
 
+    def test_normal_telemetry_does_not_guard_airport_team_command_deadline(self):
+        clock = SimulatedClock(); radio = RadioManager(); serial = ResponsiveFakeSerial(clock)
+        radio._serial = serial; radio.state.connected = True
+        radio.robots.register_expected_robots(["A"]); radio.select_robot("A")
+        with patch("core.serial_manager.time.monotonic_ns", clock.monotonic_ns), \
+             patch("core.serial_manager.time.monotonic", clock.monotonic), \
+             patch("core.radio_manager.time.monotonic_ns", clock.monotonic_ns):
+            radio.set_radio_profile(NORMAL)
+            for now_ns in range(0, 301_000_000, 1_000_000):
+                clock.now_ns = now_ns; radio._tick()
+        command_times = [timestamp for timestamp, frame in serial.frames
+                         if frame[2] == Protocol.TEAM_VELOCITY_TYPE]
+        self.assertEqual(command_times, list(range(0, 301_000_000, 50_000_000)))
+        self.assertEqual(radio.link_stats.max_command_tx_gap_ms, 50.0)
+        self.assertEqual(radio.link_stats.command_frames_sent, len(command_times))
+
     def test_120_hz_accumulative_deadlines_do_not_drift(self):
         scheduler = RadioScheduler(VALIDATION_120); scheduler.reset(0)
         sends = 0
@@ -238,13 +254,13 @@ class RadioFakeSerialIntegrationTests(unittest.TestCase):
         self.assertEqual(set(targets), {"A"})
         self.assertEqual(self.radio.robots.uplink_robot_id, "A")
 
-    def test_profile_change_resets_deadlines_and_guard_is_profile_specific(self):
+    def test_profile_change_resets_deadlines_without_guarding_team_commands(self):
         with patch("core.serial_manager.time.monotonic_ns", self.clock.monotonic_ns), \
              patch("core.serial_manager.time.monotonic", self.clock.monotonic), \
              patch("core.radio_manager.time.monotonic_ns", self.clock.monotonic_ns):
             self.radio.set_radio_profile(NORMAL); self.radio._tick()
             self.clock.now_ns = 100_000_000; self.radio._tick()
-            self.assertGreaterEqual(self.radio.scheduler.next_command_ns, 180_000_000)
+            self.assertEqual(self.radio.scheduler.next_command_ns, 150_000_000)
             self.clock.now_ns = 1_000_000_000
             self.radio.set_radio_profile(VALIDATION_120); self.radio._tick()
             self.assertLess(self.radio.scheduler.next_command_ns, 1_020_000_000)

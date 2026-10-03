@@ -164,14 +164,37 @@ aplicado depois de SOF, tamanho, tipo, versao, CRC e sequence validos. Sequence
 duplicada ou antiga nao atualiza o comando nem repete kick. Kick e gerado apenas
 na borda `0 -> 1`; o primeiro frame observado estabelece o baseline.
 
-O watchdog AirPort usa `MATCH_AIRPORT_COMMAND_TIMEOUT_MS=100`. Inicializacao,
+O watchdog AirPort usa `MATCH_AIRPORT_COMMAND_TIMEOUT_MS=120`. Inicializacao,
 ausencia de frame e timeout aplicam safe state. Os contadores ficam em
 `MatchControlStats`: `team_frames_ok`, `team_frames_bad_crc`,
-`team_frames_bad_version`, `team_frames_duplicate` e `team_frames_timeout`.
+`team_frames_bad_version`, `team_frames_duplicate`, `team_frames_old`,
+`team_frames_missed` e `team_frames_timeout`. No STM32CubeIDE, os mesmos eventos
+podem ser acompanhados diretamente pelas variaveis `match_dbg_team_frames_ok`,
+`match_dbg_team_frames_bad_crc`, `match_dbg_team_frames_duplicate`,
+`match_dbg_team_frames_old`, `match_dbg_team_frames_missed`,
+`match_dbg_watchdog_trips`, `match_dbg_team_timeouts`,
+`match_dbg_last_interframe_ms`, `match_dbg_max_interframe_ms` e
+`match_dbg_last_sequence`.
 
 Um frame de 32 bytes ocupa aproximadamente `33,3 ms` em 9600 baud/8N1. Assim,
-50 Hz nao e fisicamente possivel nesse baud; para o primeiro teste, use no
-maximo cerca de 20--25 Hz para manter folga no enlace e no timeout de 100 ms.
+50 Hz nao e fisicamente possivel nesse baud; para o primeiro teste, use 20 Hz.
+O timeout de 120 ms admite um frame de 50 ms perdido e pequena margem de jitter,
+sem enfraquecer o failsafe para centenas de milissegundos. O watchdog interno
+do AppC continua em 150 ms; o watchdog MATCH normalmente atua primeiro.
+
+No Configurator, D1 nao usa a janela de guarda de telemetria: o deadline de
+comando permanece acumulativo em 50 ms e E0/E1 e best-effort. Em conflito, D1
+e escrito primeiro e uma resposta E1 pode ser perdida. Para diagnostico, o host
+mantem `last_command_tx_ns`, `max_command_tx_gap_ms` e `command_frames_sent`.
+Compare `max_command_tx_gap_ms` com `match_dbg_max_interframe_ms`: gap alto nos
+dois lados indica atraso no host; gap normal no host e alto no STM32 indica
+perda ou atraso no AirPort/RF. CRC crescente indica corrupcao, enquanto salto
+de sequence aumenta `match_dbg_team_frames_missed`.
+
+Zero normal e um comando habilitado sem brake: a rampa usa `maxLinearAccel` e,
+ao chegar a zero, o motor fica em coast. Um brake explicito usa
+`maxBrakeAccel`; emergency stop, slot desabilitado e watchdog mantem
+`enabled=false`, `brake=true` e forcam o estado seguro/freio eletrico.
 
 ## Uplink solicitado no AirPort Team
 

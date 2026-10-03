@@ -93,6 +93,14 @@ class TeamControlTests(unittest.TestCase):
         for robot_id in "ABC":
             self.assertEqual(slot(first, robot_id), (0, 0, 0, 0, Protocol.TEAM_FLAG_BRAKE))
 
+    def test_selected_zero_is_enabled_coast_not_brake(self):
+        self.radio.select_robot("A")
+        self.radio.send_command(0.0, 0.0, 0.0,
+                                brake=self.radio._command_brake((0.0, 0.0, 0.0)))
+        command = slot(self.serial.frames[-1], "A")
+        self.assertEqual(command[:4], (0, 0, 0, 0))
+        self.assertEqual(command[4], Protocol.TEAM_FLAG_ENABLED)
+
     def test_selection_updates_only_selected_slot_and_no_telemetry_allows_control(self):
         self.radio.select_robot("A")
         self.radio.send_command(1.0, -0.5, 0.25)

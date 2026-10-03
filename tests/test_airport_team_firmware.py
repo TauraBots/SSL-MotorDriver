@@ -50,7 +50,8 @@ class TeamReceiverModel:
         self.command = self.safe_command()
         self.stats = {
             "ok": 0, "bad_crc": 0, "bad_version": 0,
-            "duplicate": 0, "timeout": 0,
+            "duplicate": 0, "old": 0, "missed": 0, "timeout": 0,
+            "last_gap": 0, "max_gap": 0, "watchdog_trips": 0,
         }
 
     @staticmethod
@@ -78,7 +79,9 @@ class TeamReceiverModel:
                 self.stats["duplicate"] += 1
                 return False
             if delta >= 0x8000:
+                self.stats["old"] += 1
                 return False
+            self.stats["missed"] += delta - 1
             self.expanded_sequence += delta
         self.last_sequence = sequence
 
@@ -96,14 +99,19 @@ class TeamReceiverModel:
                 "chip": bool(flags & FLAG_CHIP), "brake": bool(flags & FLAG_BRAKE),
                 "dribbler": bool(flags & FLAG_DRIBBLER), "enabled": True,
             }
+        if self.last_tick is not None:
+            gap = tick - self.last_tick
+            self.stats["last_gap"] = gap
+            self.stats["max_gap"] = max(self.stats["max_gap"], gap)
         self.last_tick = tick
         self.stats["ok"] += 1
         return True
 
     def task(self, tick):
-        if self.last_tick is None or tick - self.last_tick >= 100:
+        if self.last_tick is None or tick - self.last_tick >= 120:
             if self.last_tick is not None:
                 self.stats["timeout"] += 1
+                self.stats["watchdog_trips"] += 1
                 self.last_tick = None
             self.command = self.safe_command()
 
@@ -203,6 +211,24 @@ class AirportTeamProtocolTests(unittest.TestCase):
         self.assertTrue(receiver.process(team_frame(100, ROBOTS)))
         self.assertFalse(receiver.process(team_frame(99, ROBOTS)))
         self.assertEqual(receiver.stats["ok"], 1)
+        self.assertEqual(receiver.stats["old"], 1)
+
+    def test_sequence_missed_duplicate_and_wrap_accounting(self):
+        receiver = TeamReceiverModel("A")
+        self.assertTrue(receiver.process(team_frame(10, ROBOTS), tick=10))
+        self.assertTrue(receiver.process(team_frame(11, ROBOTS), tick=60))
+        self.assertEqual(receiver.stats["missed"], 0)
+        self.assertTrue(receiver.process(team_frame(13, ROBOTS), tick=115))
+        self.assertEqual(receiver.stats["missed"], 1)
+        self.assertFalse(receiver.process(team_frame(13, ROBOTS), tick=116))
+        self.assertEqual(receiver.stats["duplicate"], 1)
+        self.assertEqual(receiver.stats["last_gap"], 55)
+        self.assertEqual(receiver.stats["max_gap"], 55)
+
+        wrapped = TeamReceiverModel("A")
+        self.assertTrue(wrapped.process(team_frame(0xFFFF, ROBOTS)))
+        self.assertTrue(wrapped.process(team_frame(0, ROBOTS)))
+        self.assertEqual(wrapped.stats["missed"], 0)
 
     def test_disabled_slot_and_timeout_force_safe_state(self):
         receiver = TeamReceiverModel("B")
@@ -212,9 +238,10 @@ class AirportTeamProtocolTests(unittest.TestCase):
         self.assertTrue(receiver.command["brake"])
         self.assertTrue(receiver.process(team_frame(2, ROBOTS), tick=20))
         self.assertTrue(receiver.command["enabled"])
-        receiver.task(120)
+        receiver.task(140)
         self.assertFalse(receiver.command["enabled"])
         self.assertEqual(receiver.stats["timeout"], 1)
+        self.assertEqual(receiver.stats["watchdog_trips"], 1)
 
     def test_e0_only_the_addressed_robot_responds_after_turnaround(self):
         for target in "ABC":
@@ -278,7 +305,7 @@ class AirportTeamProtocolTests(unittest.TestCase):
         self.assertEqual(robot.tx, [(3, 0xE1)])
 
         robot.discovery_request(9, tick=4)
-        robot.task(101)
+        robot.task(121)
         self.assertFalse(robot.receiver.command["enabled"])
         self.assertTrue(robot.receiver.command["brake"])
         self.assertEqual(robot.receiver.stats["timeout"], 1)
@@ -313,6 +340,16 @@ class AirportTeamProtocolTests(unittest.TestCase):
         self.assertNotIn("Serial_ConfigResponseTask();\n    Serial_DiscoveryTask();\n    Serial_TelemetryTask();\n  }\n  else", service_c)
         self.assertIn("MatchControl_HandleTeamFrame", match_c)
         self.assertIn("MATCH_AIRPORT_COMMAND_TIMEOUT_MS", match_c)
+        match_h = (ROOT / "Core/Inc/match_control.h").read_text()
+        self.assertIn("MATCH_AIRPORT_COMMAND_TIMEOUT_MS 120U", match_h)
+        for counter in (
+                "match_dbg_team_frames_ok", "match_dbg_team_frames_bad_crc",
+                "match_dbg_team_frames_duplicate", "match_dbg_team_frames_old",
+                "match_dbg_team_frames_missed", "match_dbg_watchdog_trips",
+                "match_dbg_team_timeouts", "match_dbg_last_interframe_ms",
+                "match_dbg_max_interframe_ms", "match_dbg_last_sequence"):
+            self.assertIn(counter, match_c)
+            self.assertIn(counter, match_h)
 
         tx_guard_start = service_c.index(
             "static uint8_t Serial_TxAllowed(const uint8_t *data, uint16_t len)\n{")

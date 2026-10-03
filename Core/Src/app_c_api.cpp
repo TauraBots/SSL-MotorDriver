@@ -190,9 +190,7 @@ extern "C" void AppC_FastTick1kHz(void)
 {
   if ((g_cartesianCommand != 0U) && (g_communicationOk != 0U))
   {
-    const bool braking = (stop_mode_brake != 0U) ||
-                         ((g_desiredVx == 0.0f) && (g_desiredVy == 0.0f) &&
-                          (g_desiredOmega == 0.0f));
+    const bool braking = (stop_mode_brake != 0U);
     const LimitedRobotVelocity applied = g_accelerationLimiter.Update(
         g_desiredVx, g_desiredVy, g_desiredOmega, kControlDtS, braking);
     float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};

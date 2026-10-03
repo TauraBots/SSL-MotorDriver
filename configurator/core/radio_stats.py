@@ -44,12 +44,21 @@ class RadioLinkStats:
         self.tx_bytes_total = self.rx_bytes_total = 0
         self.telemetry_unmatched_responses = self.telemetry_timed_out_requests = 0
         self.telemetry_probe_timeouts = 0
+        self.last_command_tx_ns = None
+        self.max_command_tx_gap_ms = 0.0
+        self.command_frames_sent = 0
         self._commands = deque(); self._requests = deque(); self._responses = deque()
         self._tx_bytes = deque(); self._rx_bytes = deque(); self._latencies = deque()
         self._outcomes = deque()
 
     def record_command(self, now_ns):
-        self.command_tx_total += 1; self._commands.append(int(now_ns))
+        now_ns = int(now_ns)
+        if self.last_command_tx_ns is not None:
+            gap_ms = (now_ns - self.last_command_tx_ns) / 1_000_000
+            self.max_command_tx_gap_ms = max(self.max_command_tx_gap_ms, gap_ms)
+        self.last_command_tx_ns = now_ns
+        self.command_frames_sent += 1
+        self.command_tx_total += 1; self._commands.append(now_ns)
 
     def record_request(self, now_ns):
         self.telemetry_request_tx_total += 1; self._requests.append(int(now_ns))

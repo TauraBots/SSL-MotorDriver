@@ -19,7 +19,20 @@ static uint8_t last_team_flags_valid[3] = {0U, 0U, 0U};
 static uint16_t last_team_sequence = 0U;
 static uint32_t expanded_team_sequence = 0U;
 static uint8_t has_team_sequence = 0U;
+static uint32_t last_valid_team_frame_tick = 0U;
+static uint8_t has_valid_team_frame_tick = 0U;
 static MatchControlStats stats;
+
+volatile uint32_t match_dbg_team_frames_ok = 0U;
+volatile uint32_t match_dbg_team_frames_bad_crc = 0U;
+volatile uint32_t match_dbg_team_frames_duplicate = 0U;
+volatile uint32_t match_dbg_team_frames_old = 0U;
+volatile uint32_t match_dbg_team_frames_missed = 0U;
+volatile uint32_t match_dbg_watchdog_trips = 0U;
+volatile uint32_t match_dbg_team_timeouts = 0U;
+volatile uint32_t match_dbg_last_interframe_ms = 0U;
+volatile uint32_t match_dbg_max_interframe_ms = 0U;
+volatile uint32_t match_dbg_last_sequence = 0U;
 
 typedef enum
 {
@@ -73,16 +86,23 @@ static TeamSequenceStatus AcceptTeamSequence(uint16_t sequence,
   {
     return TEAM_SEQUENCE_DUPLICATE;
   }
-  if (has_match_command == 0U)
+  if (delta >= 0x8000U)
   {
+    if (has_match_command != 0U)
+    {
+      return TEAM_SEQUENCE_OLD;
+    }
+    /* After a watchdog timeout, permit a restarted host to establish a new
+     * sequence epoch without classifying that restart as packet loss. */
     last_team_sequence = sequence;
     expanded_team_sequence++;
     *expanded_sequence = expanded_team_sequence;
     return TEAM_SEQUENCE_NEW;
   }
-  if (delta >= 0x8000U)
+
+  if (delta > 1U)
   {
-    return TEAM_SEQUENCE_OLD;
+    match_dbg_team_frames_missed += (uint32_t)(delta - 1U);
   }
 
   last_team_sequence = sequence;
@@ -153,7 +173,19 @@ void MatchControl_Init(void)
   last_team_sequence = 0U;
   expanded_team_sequence = 0U;
   has_team_sequence = 0U;
+  last_valid_team_frame_tick = 0U;
+  has_valid_team_frame_tick = 0U;
   memset(&stats, 0, sizeof(stats));
+  match_dbg_team_frames_ok = 0U;
+  match_dbg_team_frames_bad_crc = 0U;
+  match_dbg_team_frames_duplicate = 0U;
+  match_dbg_team_frames_old = 0U;
+  match_dbg_team_frames_missed = 0U;
+  match_dbg_watchdog_trips = 0U;
+  match_dbg_team_timeouts = 0U;
+  match_dbg_last_interframe_ms = 0U;
+  match_dbg_max_interframe_ms = 0U;
+  match_dbg_last_sequence = 0U;
   AppC_ForceSafeState();
 }
 
@@ -192,7 +224,7 @@ void MatchControl_HandleTeamFrame(const uint8_t *frame, uint16_t len)
   {
     if (decode_result == SERIAL_TEAM_DECODE_BAD_CRC)
     {
-      stats.team_frames_bad_crc++;
+      match_dbg_team_frames_bad_crc++;
     }
     else if (decode_result == SERIAL_TEAM_DECODE_BAD_VERSION)
     {
@@ -220,15 +252,30 @@ void MatchControl_HandleTeamFrame(const uint8_t *frame, uint16_t len)
       AcceptTeamSequence(decoded.sequence, &command_sequence);
   if (sequence_status == TEAM_SEQUENCE_DUPLICATE)
   {
-    stats.team_frames_duplicate++;
+    match_dbg_team_frames_duplicate++;
     stats.ignored_frames++;
     return;
   }
   if (sequence_status == TEAM_SEQUENCE_OLD)
   {
+    match_dbg_team_frames_old++;
     stats.ignored_frames++;
     return;
   }
+
+  const uint32_t now = HAL_GetTick();
+  if (has_valid_team_frame_tick != 0U)
+  {
+    const uint32_t gap = now - last_valid_team_frame_tick;
+    match_dbg_last_interframe_ms = gap;
+    if (gap > match_dbg_max_interframe_ms)
+    {
+      match_dbg_max_interframe_ms = gap;
+    }
+  }
+  last_valid_team_frame_tick = now;
+  has_valid_team_frame_tick = 1U;
+  match_dbg_last_sequence = decoded.sequence;
 
   const uint8_t index = (uint8_t)robot_index;
   const SerialTeamRobotSlot *slot = &decoded.robots[index];
@@ -258,12 +305,12 @@ void MatchControl_HandleTeamFrame(const uint8_t *frame, uint16_t len)
     command.sequence = command_sequence;
   }
 
-  last_command_tick = HAL_GetTick();
+  last_command_tick = now;
   command_timeout_ms = MATCH_AIRPORT_COMMAND_TIMEOUT_MS;
   has_match_command = 1U;
   last_command_is_team = 1U;
   stats.accepted_frames++;
-  stats.team_frames_ok++;
+  match_dbg_team_frames_ok++;
   stats.last_sequence = command_sequence;
   AppC_ApplyRobotCommand(&command);
 }
@@ -280,10 +327,10 @@ void MatchControl_Task(void)
       ((HAL_GetTick() - last_command_tick) >= command_timeout_ms))
   {
     has_match_command = 0U;
-    stats.watchdog_trips++;
+    match_dbg_watchdog_trips++;
     if (last_command_is_team != 0U)
     {
-      stats.team_frames_timeout++;
+      match_dbg_team_timeouts++;
     }
     AppC_ForceSafeState();
   }
@@ -294,5 +341,14 @@ void MatchControl_GetStats(MatchControlStats *out)
   if (out != 0)
   {
     *out = stats;
+    out->watchdog_trips = match_dbg_watchdog_trips;
+    out->team_frames_ok = match_dbg_team_frames_ok;
+    out->team_frames_bad_crc = match_dbg_team_frames_bad_crc;
+    out->team_frames_duplicate = match_dbg_team_frames_duplicate;
+    out->team_frames_old = match_dbg_team_frames_old;
+    out->team_frames_missed = match_dbg_team_frames_missed;
+    out->team_frames_timeout = match_dbg_team_timeouts;
+    out->team_last_interframe_ms = match_dbg_last_interframe_ms;
+    out->team_max_interframe_ms = match_dbg_max_interframe_ms;
   }
 }

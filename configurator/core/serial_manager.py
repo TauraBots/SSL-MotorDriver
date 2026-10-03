@@ -135,6 +135,14 @@ class SerialManager(QObject):
                                                    vx, vy, omega, kick_power, brake), "command")
         self.command_sent.emit(vx, vy, omega, self._sequence)
 
+    def _command_brake(self, motion):
+        """Legacy D0 stops request brake; AirPort Team overrides this policy."""
+        return self._brake or motion == (0.0, 0.0, 0.0)
+
+    def _telemetry_may_guard_commands(self):
+        """Legacy transports may reserve a telemetry reply window."""
+        return self.profile.telemetry_reply_guard
+
     def emergency_stop(self):
         self._target = (0.0, 0.0, 0.0); self._brake = True
         self.state.vx = self.state.vy = self.state.omega = 0.0
@@ -205,12 +213,12 @@ class SerialManager(QObject):
                 motion = self._limited_motion(now)
                 kick = self._kick_power if self._kick_pending else 0
                 self.send_command(*motion, kick_power=kick,
-                                  brake=self._brake or motion == (0.0, 0.0, 0.0))
+                                  brake=self._command_brake(motion))
                 self._kick_pending = False
             if due.telemetry:
                 telemetry_sent = self.send_telemetry_request(
                     self._telemetry_flags_for_next_request(now_ns))
-                if telemetry_sent and self.profile.telemetry_reply_guard:
+                if telemetry_sent and self._telemetry_may_guard_commands():
                     guard_ns = round(Protocol.TELEMETRY_REPLY_WINDOW_S * 1_000_000_000)
                     self.scheduler.guard_command_until(now_ns + guard_ns)
             if self._last_telemetry and now - self._last_telemetry > 1.0 and not self._lost_emitted:

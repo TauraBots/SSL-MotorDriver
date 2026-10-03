@@ -72,6 +72,16 @@ class RadioManager(SerialManager):
         self._team_sequence = (sequence + 1) & 0xFFFF
         return sequence
 
+    def _command_brake(self, motion):
+        # A normal zero command coasts after the linear acceleration ramp.
+        # Brake is reserved for an explicit stop, disable or failsafe.
+        return self._brake
+
+    def _telemetry_may_guard_commands(self):
+        # D1 has absolute priority. Losing an E1 is preferable to stretching a
+        # 50 ms command period toward the firmware watchdog threshold.
+        return False
+
     def _next_poll_robot_id(self):
         if self.robots.uplink_robot_id is not None:
             return self.robots.uplink_robot_id
@@ -317,6 +327,7 @@ class RadioManager(SerialManager):
         self.state.robot_id = robot_id
         command = self._team_commands[robot_id]
         self.state.vx, self.state.vy, self.state.omega = command.vx, command.vy, command.omega
+        self._brake = False
 
     def clear_robot_selection(self):
         active = self.robots.active_robot

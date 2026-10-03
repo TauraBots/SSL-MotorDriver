@@ -33,6 +33,15 @@ int main()
   {
     limiter.Update(2.0f, 0.0f, 0.0f, kDt, false);
   }
+  const float beforeNormalStop = limiter.Applied().vx;
+  const LimitedRobotVelocity normalStop = limiter.Update(0.0f, 0.0f, 0.0f, kDt, false);
+  assert(Near(beforeNormalStop - normalStop.vx, config.maxLinearAccel * kDt));
+
+  limiter.Reset();
+  for (int i = 0; i < 1000; ++i)
+  {
+    limiter.Update(2.0f, 0.0f, 0.0f, kDt, false);
+  }
   const float beforeBrake = limiter.Applied().vx;
   const LimitedRobotVelocity braking = limiter.Update(0.0f, 0.0f, 0.0f, kDt, true);
   assert(Near(beforeBrake - braking.vx, config.maxBrakeAccel * kDt));
