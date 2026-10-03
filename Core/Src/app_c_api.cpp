@@ -2,6 +2,7 @@
 
 #include "app.hpp"
 #include "acceleration_limiter.hpp"
+#include "kicker_board.h"
 #include "omni_kinematics.hpp"
 #include <cmath>
 
@@ -111,6 +112,7 @@ bool AcceptCommandLocked(uint32_t sequence, uint8_t kickPower, uint8_t brakeMode
 
 void EnterSafeState()
 {
+  KickerBoard_CancelPendingKick();
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   setpoint_m1 = 0.0f;
@@ -295,6 +297,10 @@ extern "C" void AppC_ApplyRobotCommand(const RobotCommand *command)
     g_desiredVy = command->vy;
     g_desiredOmega = command->omega;
     g_cartesianCommand = 1U;
+    if ((command->kick != 0U) && (command->kick_power >= 1U))
+    {
+      (void)KickerBoard_RequestAutoKick(command->kick_power);
+    }
   }
   if (primask == 0U)
   {
@@ -354,6 +360,7 @@ extern "C" void AppC_SetMotionLimits(float max_linear_accel,
 
 extern "C" void AppC_EmergencyStop(void)
 {
+  KickerBoard_CancelPendingKick();
   TIM1->CCER = 0U;
   TIM8->CCER = 0U;
   TIM1->BDTR &= ~TIM_BDTR_MOE;

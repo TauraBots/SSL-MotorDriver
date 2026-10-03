@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_c_api.h"
 #include "firmware_runtime.h"
+#include "kicker_board.h"
 #include "robot_identity.h"
 #include "serial_service.h"
 
@@ -142,6 +143,7 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+  KickerBoard_Init(&hi2c2);
   ApplyCommModeUartBaud();
   FirmwareRuntime_WatchdogInit();
   RobotIdentity_Init();
@@ -168,6 +170,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     AppC_Tick();
     SerialService_Task();
+    KickerBoard_Task();
     FirmwareRuntime_WatchdogRefresh();
   }
   /* USER CODE END 3 */
