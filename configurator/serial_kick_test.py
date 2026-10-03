@@ -5,7 +5,7 @@ import sys
 
 PORT = "COM4"       # TROQUE pela COM do STM32
 BAUD = 9600
-KICK_POWER = 20     # 10% primeiro
+KICK_POWER = 20     # 20% primeiro
 DURATION = 3.0      # mantém D1 vivo por 3 segundos
 RATE_HZ = 20
 
