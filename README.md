@@ -15,7 +15,9 @@ Hardware configurado no CubeMX:
 
 - `STM32F103RCTx` em `LQFP64`
 - `HSE 8 MHz` com `SYSCLK 72 MHz`
-- `USART2` em `PA2/PA3`: `9600` baud no bench/AirPort, `420000` baud no match/CRSF
+- `USART2` em `PA2/PA3`, 8N1, TX+RX e sem flow control
+- o `.ioc` mantem `USART2` em `9600` baud como base; apos a inicializacao
+  gerada pelo CubeMX, `ApplyCommModeUartBaud()` aplica `420000` no build match
 - `TIM1/TIM8` para PWM
 - `TIM2/TIM3/TIM4/TIM5` para encoder
 
@@ -42,6 +44,13 @@ Perfis de firmware:
 - `quadmd_match`: adicionar os simbolos de compilacao
   `TAURA_COMM_MODE=COMM_MODE_MATCH` e
   `TAURA_MATCH_TRANSPORT=MATCH_TRANSPORT_CHANNELS`, USART2 `420000`, CRSF.
+
+A selecao de baud fica em blocos `USER CODE` de `Core/Src/main.c`. Portanto,
+regenerar o projeto pelo CubeMX pode recriar a atribuicao base de `9600` em
+`MX_USART2_UART_Init()`, mas nao remove a aplicacao posterior do baud de match.
+Para conferir o valor ativo no firmware, inspecione `huart2.Init.BaudRate` no
+debugger depois de `ApplyCommModeUartBaud()`: `9600` no bench e `420000` no
+match.
 
 Detalhes do modo de partida: [ELRS multi-robot match mode](docs/elrs-multi-robot-match-mode.md).
 

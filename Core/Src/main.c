@@ -79,10 +79,24 @@ static void MX_TIM4_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
+static void ApplyCommModeUartBaud(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void ApplyCommModeUartBaud(void)
+{
+  if (huart2.Init.BaudRate == USART2_CONFIGURED_BAUD)
+  {
+    return;
+  }
+
+  huart2.Init.BaudRate = USART2_CONFIGURED_BAUD;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -126,6 +140,7 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+  ApplyCommModeUartBaud();
   FirmwareRuntime_WatchdogInit();
   RobotIdentity_Init();
   AppC_Init(&hadc1, &htim1, &htim8, &htim5, &htim3, &htim2, &htim4, LED_GPIO_Port, LED_Pin);
@@ -688,7 +703,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = USART2_CONFIGURED_BAUD;
+  huart2.Init.BaudRate = 9600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;

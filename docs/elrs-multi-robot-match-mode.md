@@ -52,6 +52,26 @@ quadmd_bench: USART2 = 9600 baud, 8N1
 quadmd_match: USART2 = 420000 baud, 8N1
 ```
 
+O arquivo `YahBoom-4ch.ioc` permanece com `USART2.BaudRate=9600`. Esse e o
+valor base do CubeMX e faz com que `MX_USART2_UART_Init()` continue sendo codigo
+gerado normal e compativel com o perfil bench. Depois que todos os perifericos
+sao inicializados, `main()` chama `ApplyCommModeUartBaud()` dentro de um bloco
+`USER CODE`. A funcao tambem esta em bloco protegido e:
+
+- mantem `9600` sem reinicializacao no build bench;
+- troca `huart2.Init.BaudRate` para `420000` e chama `HAL_UART_Init()` novamente
+  no build match, antes de `SerialService_Init()` iniciar DMA/recepcao.
+
+Assim, uma nova geracao pode reescrever a linha de baud dentro de
+`MX_USART2_UART_Init()` para `9600`, conforme o `.ioc`, sem perder a selecao de
+match. Nao mova a selecao dinamica de volta para essa linha gerada.
+
+Para verificar em firmware, coloque um breakpoint depois de
+`ApplyCommModeUartBaud()` e inspecione `huart2.Init.BaudRate`. O valor deve ser
+`9600` com `TAURA_COMM_MODE=COMM_MODE_BENCH` e `420000` com
+`TAURA_COMM_MODE=COMM_MODE_MATCH`. Uma verificacao eletrica equivalente pode
+ser feita medindo `PA2` (USART2 TX) com analisador logico configurado para 8N1.
+
 Nao houve alteracao de pinagem. A placa documentada possui `USART2` em
 `PA2/PA3` com DMA; nenhum segundo UART foi configurado sem conflito no `.ioc`.
 Assim, bench e match sao modos alternativos sobre a UART existente.
