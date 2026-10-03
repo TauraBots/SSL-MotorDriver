@@ -44,6 +44,7 @@ uint32_t g_lastSequenceTick = 0U;
 uint8_t g_hasCommand = 0U;
 uint8_t g_communicationOk = 0U;
 uint8_t g_kickPower = 0U;
+uint8_t g_safeStateActive = 0U;
 inline float ClampSetpoint(float x)
 {
   if (x > kSetpointMaxRpm)
@@ -107,12 +108,18 @@ bool AcceptCommandLocked(uint32_t sequence, uint8_t kickPower, uint8_t brakeMode
   live_comm_accepted_packets++;
   live_comm_state = 1U;
   live_comm_kick_power = g_kickPower;
+  g_safeStateActive = 0U;
   return true;
 }
 
 void EnterSafeState()
 {
   KickerBoard_CancelPendingKick();
+  if (g_safeStateActive == 0U)
+  {
+    (void)KickerBoard_RequestSafeStop();
+    g_safeStateActive = 1U;
+  }
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   setpoint_m1 = 0.0f;
@@ -361,6 +368,8 @@ extern "C" void AppC_SetMotionLimits(float max_linear_accel,
 extern "C" void AppC_EmergencyStop(void)
 {
   KickerBoard_CancelPendingKick();
+  (void)KickerBoard_RequestSafeStop();
+  g_safeStateActive = 1U;
   TIM1->CCER = 0U;
   TIM8->CCER = 0U;
   TIM1->BDTR &= ~TIM_BDTR_MOE;

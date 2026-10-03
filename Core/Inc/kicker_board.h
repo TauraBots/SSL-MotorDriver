@@ -33,6 +33,7 @@ uint8_t KickerBoard_StartCharge(void);
 uint8_t KickerBoard_StopCharge(void);
 uint8_t KickerBoard_SetVoltage(uint16_t decivolt);
 uint8_t KickerBoard_RequestImmediateKick(void);
+uint8_t KickerBoard_RequestSafeStop(void);
 uint8_t KickerBoard_ReadStatus(KickerBoardStatus *status);
 uint8_t KickerBoard_Crc8(const uint8_t *data, uint16_t len);
 
@@ -53,6 +54,8 @@ extern volatile uint32_t kicker_dbg_kicks_sent;
 extern volatile uint32_t kicker_dbg_i2c_errors;
 extern volatile uint32_t kicker_dbg_crc_errors;
 extern volatile uint32_t kicker_dbg_invalid_status;
+extern volatile uint32_t kicker_dbg_task_calls;
+extern volatile uint32_t kicker_dbg_status_reads;
 
 #ifdef __cplusplus
 }

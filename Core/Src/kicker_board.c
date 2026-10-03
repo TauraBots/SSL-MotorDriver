@@ -11,7 +11,8 @@
 
 #define KICKER_STATUS_HEADER 0xA5U
 #define KICKER_STATUS_VERSION 0x01U
-#define KICKER_I2C_TIMEOUT_MS 2U
+#define KICKER_I2C_TX_TIMEOUT_MS 2U
+#define KICKER_I2C_STATUS_TIMEOUT_MS 10U
 #define KICKER_STATUS_PERIOD_MS 100U
 
 typedef enum
@@ -19,6 +20,7 @@ typedef enum
   KICKER_STATE_IDLE = 0,
   KICKER_STATE_AUTO_KICK_PENDING,
   KICKER_STATE_IMMEDIATE_KICK_PENDING,
+  KICKER_STATE_SAFE_STOP_PENDING,
   KICKER_STATE_WAITING_STATUS,
   KICKER_STATE_ERROR
 } KickerBoardState;
@@ -37,6 +39,8 @@ volatile uint32_t kicker_dbg_kicks_sent = 0U;
 volatile uint32_t kicker_dbg_i2c_errors = 0U;
 volatile uint32_t kicker_dbg_crc_errors = 0U;
 volatile uint32_t kicker_dbg_invalid_status = 0U;
+volatile uint32_t kicker_dbg_task_calls = 0U;
+volatile uint32_t kicker_dbg_status_reads = 0U;
 
 static I2C_HandleTypeDef *kicker_i2c = NULL;
 static KickerBoardState kicker_state = KICKER_STATE_IDLE;
@@ -57,7 +61,7 @@ static uint8_t SendCommand(uint8_t *command, uint16_t size)
   }
 
   if (HAL_I2C_Master_Transmit(kicker_i2c, KICKER_BOARD_I2C_ADDRESS,
-                              command, size, KICKER_I2C_TIMEOUT_MS) != HAL_OK)
+                              command, size, KICKER_I2C_TX_TIMEOUT_MS) != HAL_OK)
   {
     kicker_dbg_online = 0U;
     kicker_dbg_i2c_errors++;
@@ -113,6 +117,8 @@ void KickerBoard_Init(I2C_HandleTypeDef *hi2c)
   kicker_dbg_i2c_errors = 0U;
   kicker_dbg_crc_errors = 0U;
   kicker_dbg_invalid_status = 0U;
+  kicker_dbg_task_calls = 0U;
+  kicker_dbg_status_reads = 0U;
 }
 
 uint8_t KickerBoard_RequestAutoKick(uint8_t percent)
@@ -138,6 +144,19 @@ uint8_t KickerBoard_RequestImmediateKick(void)
 
   kicker_state = KICKER_STATE_IMMEDIATE_KICK_PENDING;
   kicker_dbg_kicks_requested++;
+  return 1U;
+}
+
+uint8_t KickerBoard_RequestSafeStop(void)
+{
+  if (kicker_i2c == NULL)
+  {
+    return 0U;
+  }
+
+  /* A safe stop supersedes every pending or uncertain operation. */
+  pending_auto_percent = 0U;
+  kicker_state = KICKER_STATE_SAFE_STOP_PENDING;
   return 1U;
 }
 
@@ -189,9 +208,10 @@ uint8_t KickerBoard_ReadStatus(KickerBoardStatus *status)
   last_status_attempt_ms = HAL_GetTick();
   status->valid = 0U;
   kicker_dbg_status_valid = 0U;
+  kicker_dbg_status_reads++;
   if (HAL_I2C_Master_Receive(kicker_i2c, KICKER_BOARD_I2C_ADDRESS,
                              buffer, sizeof(buffer),
-                             KICKER_I2C_TIMEOUT_MS) != HAL_OK)
+                             KICKER_I2C_STATUS_TIMEOUT_MS) != HAL_OK)
   {
     kicker_dbg_online = 0U;
     kicker_dbg_i2c_errors++;
@@ -234,6 +254,7 @@ uint8_t KickerBoard_ReadStatus(KickerBoardStatus *status)
 
 void KickerBoard_Task(void)
 {
+  kicker_dbg_task_calls++;
   const uint32_t now = HAL_GetTick();
 
   if (kicker_i2c == NULL)
@@ -266,6 +287,18 @@ void KickerBoard_Task(void)
     {
       kicker_dbg_kicks_sent++;
     }
+    kicker_status.valid = 0U;
+    kicker_dbg_status_valid = 0U;
+    kicker_state = KICKER_STATE_WAITING_STATUS;
+    return;
+  }
+
+  if (kicker_state == KICKER_STATE_SAFE_STOP_PENDING)
+  {
+    uint8_t command = KICKER_COMMAND_STOP_CHARGE;
+
+    /* One attempt per safe-stop event; no automatic transmit retry. */
+    (void)SendCommand(&command, 1U);
     kicker_status.valid = 0U;
     kicker_dbg_status_valid = 0U;
     kicker_state = KICKER_STATE_WAITING_STATUS;
