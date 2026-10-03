@@ -106,9 +106,32 @@ def safe_commands() -> tuple[RobotCommand, RobotCommand, RobotCommand]:
 
 def test_commands() -> tuple[RobotCommand, RobotCommand, RobotCommand]:
     return (
-        RobotCommand(vx=1.0, enabled=True),
-        RobotCommand(vy=1.0, enabled=True),
-        RobotCommand(omega=1.0, enabled=True),
+        # Robot A -> horário devagar
+        RobotCommand(
+            vx=0.0,
+            vy=0.0,
+            omega=-0.9,
+            brake=False,
+            enabled=True
+        ),
+
+        # Robot B -> anti-horário devagar
+        RobotCommand(
+            vx=0.0,
+            vy=0.0,
+            omega=+0.9,
+            brake=False,
+            enabled=True
+        ),
+
+        # Robot C -> desabilitado
+        RobotCommand(
+            vx=0.0,
+            vy=0.0,
+            omega=0.0,
+            brake=True,
+            enabled=False
+        ),
     )
 
 
