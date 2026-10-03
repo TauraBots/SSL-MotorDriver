@@ -13,6 +13,9 @@ FLAG_CHIP = 1 << 1
 FLAG_BRAKE = 1 << 2
 FLAG_DRIBBLER = 1 << 3
 FLAG_ENABLED = 1 << 4
+TELEMETRY_TURNAROUND_MS = 3
+DISCOVERY_SLOT_BASE_MS = 20
+DISCOVERY_SLOT_SPACING_MS = 70
 
 
 def crc16(data):
@@ -105,6 +108,49 @@ class TeamReceiverModel:
             self.command = self.safe_command()
 
 
+class AirportUplinkModel:
+    """Scheduling model for the solicited MATCH AirPort uplink."""
+
+    def __init__(self, robot_id, configured=True, uid=bytes(range(12))):
+        self.robot_id = robot_id
+        self.configured = configured
+        self.uid = uid
+        self.receiver = TeamReceiverModel(robot_id if configured else "A")
+        self.telemetry_due = None
+        self.discovery_due = None
+        self.tx = []
+
+    def telemetry_request(self, target_id, tick):
+        if (target_id == "*" or not self.configured or
+                target_id != self.robot_id or self.telemetry_due is not None):
+            return
+        self.telemetry_due = tick + TELEMETRY_TURNAROUND_MS
+
+    def discovery_request(self, nonce, tick):
+        if self.discovery_due is not None:
+            return
+        if self.configured and self.robot_id in "ABC":
+            slot = ord(self.robot_id) - ord("A")
+        else:
+            slot_hash = nonce ^ 0x7F4A7C15
+            for value in self.uid:
+                slot_hash = ((slot_hash ^ value) * 0x85EBCA6B) & 0xFFFFFFFF
+            slot = slot_hash & 0x0F
+        self.discovery_due = tick + DISCOVERY_SLOT_BASE_MS + slot * DISCOVERY_SLOT_SPACING_MS
+
+    def process_team_frame(self, frame, tick):
+        return self.receiver.process(frame, tick)
+
+    def task(self, tick):
+        self.receiver.task(tick)
+        if self.telemetry_due is not None and tick >= self.telemetry_due:
+            self.tx.append((tick, 0xE1))
+            self.telemetry_due = None
+        if self.discovery_due is not None and tick >= self.discovery_due:
+            self.tx.append((tick, 0xE3))
+            self.discovery_due = None
+
+
 ROBOTS = [
     (1000, 0, 0, 25, FLAG_ENABLED),
     (0, 1000, 0, 50, FLAG_ENABLED | FLAG_BRAKE),
@@ -170,7 +216,81 @@ class AirportTeamProtocolTests(unittest.TestCase):
         self.assertFalse(receiver.command["enabled"])
         self.assertEqual(receiver.stats["timeout"], 1)
 
-    def test_firmware_constants_routing_baud_and_rx_only_guards(self):
+    def test_e0_only_the_addressed_robot_responds_after_turnaround(self):
+        for target in "ABC":
+            with self.subTest(target=target):
+                fleet = [AirportUplinkModel(robot_id) for robot_id in "ABC"]
+                for robot in fleet:
+                    robot.telemetry_request(target, tick=100)
+                    robot.task(102)
+                    self.assertEqual(robot.tx, [])
+                    robot.task(103)
+                responders = [robot.robot_id for robot in fleet if robot.tx]
+                self.assertEqual(responders, [target])
+
+    def test_e0_other_id_and_broadcast_have_no_response(self):
+        for target in ("D", "*"):
+            fleet = [AirportUplinkModel(robot_id) for robot_id in "ABC"]
+            for robot in fleet:
+                robot.telemetry_request(target, tick=0)
+                robot.task(1000)
+            self.assertFalse(any(robot.tx for robot in fleet))
+
+    def test_only_one_telemetry_response_can_be_pending(self):
+        robot = AirportUplinkModel("A")
+        robot.telemetry_request("A", tick=10)
+        robot.telemetry_request("A", tick=11)
+        self.assertEqual(robot.telemetry_due, 10 + TELEMETRY_TURNAROUND_MS)
+        robot.task(13)
+        self.assertEqual(robot.tx, [(13, 0xE1)])
+
+    def test_discovery_abc_slots_and_serial_margin(self):
+        expected = {"A": 20, "B": 90, "C": 160}
+        for robot_id, due in expected.items():
+            with self.subTest(robot_id=robot_id):
+                robot = AirportUplinkModel(robot_id)
+                robot.discovery_request(7, tick=0)
+                self.assertEqual(robot.discovery_due, due)
+                robot.task(due - 1)
+                self.assertEqual(robot.tx, [])
+                robot.task(due)
+                self.assertEqual(robot.tx, [(due, 0xE3)])
+
+        e3_wire_time_ms = 27 * 10 * 1000 / 9600
+        self.assertLess(e3_wire_time_ms, DISCOVERY_SLOT_SPACING_MS)
+
+    def test_unconfigured_discovery_slot_depends_on_uid_and_nonce(self):
+        robot = AirportUplinkModel("\x00", configured=False)
+        slots = set()
+        for nonce in range(16):
+            robot.discovery_due = None
+            robot.discovery_request(nonce, tick=0)
+            slots.add(robot.discovery_due)
+        self.assertGreater(len(slots), 1)
+
+    def test_d1_and_watchdog_continue_while_uplink_is_pending(self):
+        robot = AirportUplinkModel("A")
+        robot.telemetry_request("A", tick=0)
+        self.assertTrue(robot.process_team_frame(team_frame(1, ROBOTS), tick=1))
+        self.assertTrue(robot.receiver.command["enabled"])
+        self.assertEqual(robot.receiver.command["vx"], 1.0)
+        robot.task(3)
+        self.assertEqual(robot.tx, [(3, 0xE1)])
+
+        robot.discovery_request(9, tick=4)
+        robot.task(101)
+        self.assertFalse(robot.receiver.command["enabled"])
+        self.assertTrue(robot.receiver.command["brake"])
+        self.assertEqual(robot.receiver.stats["timeout"], 1)
+
+    def test_no_tx_occurs_without_a_request(self):
+        for robot_id in "ABC":
+            robot = AirportUplinkModel(robot_id)
+            for tick in (0, 3, 20, 90, 160, 1000):
+                robot.task(tick)
+            self.assertEqual(robot.tx, [])
+
+    def test_firmware_constants_routing_baud_and_uplink_guards(self):
         protocol_h = (ROOT / "Core/Inc/serial_protocol.h").read_text()
         comm_h = (ROOT / "Core/Inc/comm_mode.h").read_text()
         main_c = (ROOT / "Core/Src/main.c").read_text()
@@ -182,9 +302,33 @@ class AirportTeamProtocolTests(unittest.TestCase):
         self.assertIn("#define TAURA_MATCH_TRANSPORT MATCH_TRANSPORT_AIRPORT_TEAM", comm_h)
         self.assertIn("MATCH_AIRPORT_UART_BAUD : MATCH_CRSF_UART_BAUD", main_c)
         self.assertIn("Serial_ProcessAirportTeamByte(b);", service_c)
-        self.assertIn("serial_comm_mode != COMM_MODE_BENCH", service_c)
+        self.assertIn("MATCH_DISCOVERY_SLOT_BASE_MS 20U", service_c)
+        self.assertIn("MATCH_DISCOVERY_SLOT_SPACING_MS 70U", service_c)
+        self.assertIn("team_rx_expected_len = TELEMETRY_REQUEST_PACKET_LEN", service_c)
+        self.assertIn("team_rx_expected_len = DISCOVERY_REQUEST_PACKET_LEN", service_c)
+        self.assertIn("data[2] == TX_TYPE_TELEMETRY_RESPONSE", service_c)
+        self.assertIn("data[2] == TX_TYPE_DISCOVERY_RESPONSE", service_c)
+        self.assertIn("telemetry_due_tick = now + TELEMETRY_TURNAROUND_MS", service_c)
+        self.assertIn("MatchControl_Task();", service_c)
+        self.assertNotIn("Serial_ConfigResponseTask();\n    Serial_DiscoveryTask();\n    Serial_TelemetryTask();\n  }\n  else", service_c)
         self.assertIn("MatchControl_HandleTeamFrame", match_c)
         self.assertIn("MATCH_AIRPORT_COMMAND_TIMEOUT_MS", match_c)
+
+        tx_guard_start = service_c.index(
+            "static uint8_t Serial_TxAllowed(const uint8_t *data, uint16_t len)\n{")
+        tx_guard_end = service_c.index("static uint8_t Serial_QueueTx", tx_guard_start)
+        tx_guard = service_c[tx_guard_start:tx_guard_end]
+        self.assertNotIn("TX_TYPE_CONFIG", tx_guard)
+        self.assertNotIn("RX_TYPE_ROBOT_VELOCITY", tx_guard)
+        self.assertNotIn("RX_TYPE_TEAM_VELOCITY", tx_guard)
+
+        service_h = (ROOT / "Core/Inc/serial_service.h").read_text()
+        for counter in (
+                "match_telemetry_requests", "match_telemetry_responses",
+                "match_discovery_requests", "match_discovery_responses",
+                "match_uplink_dropped_busy"):
+            self.assertIn(counter, service_c)
+            self.assertIn(counter, service_h)
 
         def selected_baud(mode, transport):
             return 9600 if mode == "bench" or transport == "airport" else 420000

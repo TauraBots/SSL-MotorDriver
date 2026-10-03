@@ -23,8 +23,10 @@ PC -> USB -> Jumper AION Nano TX
 O transporte principal de match usa AirPort como UART transparente. Um unico
 pacote Quad-MD D1 carrega comandos diferentes para A, B e C; todos os RX recebem
 os mesmos bytes e cada STM32 escolhe somente o slot do seu `robot_id` persistente.
-O STM32 nao transmite telemetria, discovery nem respostas de configuracao nesse
-modo. O backend CRSF normal continua disponivel como alternativa experimental.
+O uplink e estritamente solicitado: E0 pode produzir E1 somente no robo
+enderecado, e E2 pode produzir E3 em um slot de discovery. Respostas de
+configuracao e qualquer transmissao espontanea continuam bloqueadas nesse modo.
+O backend CRSF normal continua disponivel como alternativa experimental.
 
 ## Configuracao
 
@@ -76,8 +78,9 @@ match. Nao mova a selecao dinamica de volta para essa linha gerada.
 Para verificar em firmware, coloque um breakpoint depois de
 `ApplyCommModeUartBaud()` e inspecione `huart2.Init.BaudRate`. O valor deve ser
 `9600` no bench/AirPort Team e `420000` no match CRSF. No AirPort Team, `PA2`
-permanece configurado como TX por compatibilidade com CubeMX, mas a aplicacao nao
-envia bytes; a recepcao pode ser verificada em `PA3` com analisador logico 8N1.
+permanece configurado como TX por compatibilidade com CubeMX e transmite apenas
+respostas E1/E3 solicitadas; a recepcao pode ser verificada em `PA3` com
+analisador logico 8N1.
 
 Nao houve alteracao de pinagem. A placa documentada possui `USART2` em
 `PA2/PA3` com DMA; nenhum segundo UART foi configurado sem conflito no `.ioc`.
@@ -168,6 +171,29 @@ ausencia de frame e timeout aplicam safe state. Os contadores ficam em
 Um frame de 32 bytes ocupa aproximadamente `33,3 ms` em 9600 baud/8N1. Assim,
 50 Hz nao e fisicamente possivel nesse baud; para o primeiro teste, use no
 maximo cerca de 20--25 Hz para manter folga no enlace e no timeout de 100 ms.
+
+## Uplink solicitado no AirPort Team
+
+O parser de match aceita `D1`, `E0` e `E2`. Protocolos de configuracao, `D0` e
+demais tipos continuam ignorados. O envio tambem possui uma barreira independente:
+em `MATCH_TRANSPORT_AIRPORT_TEAM`, a fila DMA aceita somente `E1` e `E3`.
+
+- `E0 TELEMETRY_REQUEST` sempre deve conter um `robot_id` A/B/C. Somente o
+  STM32 com ID configurado igual responde, nunca ha resposta a broadcast, e E1
+  e enfileirado apos `SERIAL_TELEMETRY_TURNAROUND_MS`. Nao existe telemetria
+  espontanea e so uma resposta de telemetria pode ficar pendente.
+- `E2 DISCOVERY_REQUEST` agenda E3 nos slots A = 20 ms, B = 90 ms e C = 160 ms.
+  O espacamento de 70 ms e maior que os aproximadamente 28,1 ms necessarios para
+  transmitir os 27 bytes de E3 em 9600 baud/8N1.
+- Um dispositivo ainda sem ID usa UID e o nonce de E2 para escolher um dos
+  slots. Alterar o nonce pode alterar o slot e reduzir colisoes entre tentativas.
+
+O agendamento usa `HAL_GetTick()` e o envio usa DMA, sem espera bloqueante. A
+recepcao de D1 e `MatchControl_Task()` continuam executando antes das tarefas de
+uplink, portanto o watchdog de comando permanece ativo durante a espera de E1/E3.
+Os contadores de diagnostico sao `match_telemetry_requests`,
+`match_telemetry_responses`, `match_discovery_requests`,
+`match_discovery_responses` e `match_uplink_dropped_busy`.
 
 ## Backend alternativo: CRSF 333 Full / 16ch Rate/2
 
@@ -364,7 +390,8 @@ frames seguros (default `20`) antes de fechar a serial.
 - Confirmar AirPort transparente em 9600 baud no AION Nano TX e nos tres RX.
 - Confirmar que os tres RX entregam exatamente o mesmo D1 e que cada STM32 usa
   somente o slot correspondente ao seu `robot_id`.
-- Verificar com analisador logico que `PA2` nao transmite no match AirPort Team.
+- Verificar com analisador logico que `PA2` permanece inativo sem E0/E2 e que
+  transmite somente E1/E3 nos tempos previstos quando solicitado.
 - Medir a taxa sustentavel do frame de 32 bytes; iniciar em 20 Hz e ajustar sem
   ultrapassar o limite fisico proximo de 30 Hz em 9600/8N1.
 - Medir jitter/perda real e ajustar `MATCH_AIRPORT_COMMAND_TIMEOUT_MS` se 100 ms

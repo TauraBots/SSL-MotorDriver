@@ -13,7 +13,7 @@ typedef enum
 #define MATCH_CRSF_UART_BAUD 420000U
 
 #ifndef TAURA_COMM_MODE
-#define TAURA_COMM_MODE COMM_MODE_BENCH
+#define TAURA_COMM_MODE COMM_MODE_MATCH
 #endif
 
 typedef enum
