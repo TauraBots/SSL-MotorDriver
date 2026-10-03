@@ -60,9 +60,10 @@ class ProtocolTrafficEstimate:
 
 
 def estimate_protocol_traffic(profile):
-    """Estimate one-robot protocol traffic for a target profile."""
+    """Estimate AirPort Team protocol traffic for a target profile."""
     profile = get_radio_profile(profile)
-    command_bytes = len(Protocol.encode_velocity("A", 0, 0.0, 0.0, 0.0))
+    # The Qt AirPort manager sends one fixed A+B+C D1 frame per command tick.
+    command_bytes = Protocol.TEAM_FRAME_SIZE
     request_bytes = len(Protocol.encode_telemetry_request("A", 0))
     fast_bytes = (Protocol.TELEMETRY_RESPONSE_BASE_SIZE + 7 + 16)
     full_bytes = fast_bytes + 4 + 13

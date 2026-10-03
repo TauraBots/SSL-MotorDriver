@@ -89,8 +89,9 @@ class MultiRobotTelemetryTests(unittest.TestCase):
         self.assertTrue(self.radio.robots.active_robot.can_control)
         self.radio.send_command(0.3, 0.0, 0.0)
         frame = self.radio._serial.frames[-1]
-        self.assertEqual(frame[2], Protocol.ROBOT_VELOCITY_TYPE)
-        self.assertEqual(chr(frame[4]), "B")
+        self.assertEqual(frame[2], Protocol.TEAM_VELOCITY_TYPE)
+        self.assertEqual(struct.unpack_from("<h", frame, 14)[0], 300)
+        self.assertTrue(frame[21] & Protocol.TEAM_FLAG_ENABLED)
 
     def test_manual_expected_robots_are_polled_without_discovery(self):
         radio = RadioManager(); radio._serial = FakeSerial(); radio.state.robot_id = "A"
@@ -108,8 +109,9 @@ class MultiRobotTelemetryTests(unittest.TestCase):
         radio.robots.register_expected_robots(["A"]); radio.select_robot("A")
         radio.send_command(0.3, 0.0, 0.0)
         frame = radio._serial.frames[-1]
-        self.assertEqual(frame[2], Protocol.ROBOT_VELOCITY_TYPE)
-        self.assertEqual(chr(frame[4]), "A")
+        self.assertEqual(frame[2], Protocol.TEAM_VELOCITY_TYPE)
+        self.assertEqual(struct.unpack_from("<h", frame, 6)[0], 300)
+        self.assertTrue(frame[13] & Protocol.TEAM_FLAG_ENABLED)
 
 
 if __name__ == "__main__":

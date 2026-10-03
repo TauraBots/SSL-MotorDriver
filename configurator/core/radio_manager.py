@@ -1,14 +1,11 @@
-"""AirPort-facing manager prepared for a multi-robot transport.
-
-For now it preserves the exact single-target SerialManager transport and only
-adds fleet/state observation on top of existing signals.
-"""
+"""AirPort Team manager with D1 control and time-slotted uplink handling."""
 
 import time
+from dataclasses import replace
 
 from PySide6.QtCore import QTimer, Signal
 
-from .protocol import Protocol
+from .protocol import Protocol, TeamRobotCommand
 from .robot_manager import RobotManager
 from .serial_manager import SerialManager
 
@@ -18,6 +15,7 @@ class RadioManager(SerialManager):
     MAX_FRAMES_PER_TICK = 32
     UPLINK_TIMEOUT_S = 1.5
     UPLINK_PROBE_INTERVAL_MS = 500
+    EMERGENCY_SAFE_FRAMES = 3
     discovery_started = Signal()
     discovery_finished = Signal(object)
 
@@ -28,6 +26,8 @@ class RadioManager(SerialManager):
         self._config_responses = []; self._config_received_bytes = 0
         self._uplink_probe_index = 0; self._last_probe_ns = None
         self._telemetry_requests = {}; self._last_full_request_ns = {}
+        self._team_sequence = 0
+        self._team_commands = self._safe_team_commands()
         self.uplink_timeout_s = self.UPLINK_TIMEOUT_S
         self.uplink_probe_interval_ms = self.UPLINK_PROBE_INTERVAL_MS
         self._fleet_health_timer = QTimer(self); self._fleet_health_timer.setInterval(250)
@@ -55,7 +55,22 @@ class RadioManager(SerialManager):
     def connect_serial(self, port, baud, robot_id):
         self._telemetry_requests.clear(); self._last_full_request_ns.clear()
         self._uplink_probe_index = 0; self._last_probe_ns = None
+        self._team_sequence = 0; self._team_commands = self._safe_team_commands()
         super().connect_serial(port, baud, robot_id)
+
+    @staticmethod
+    def _safe_team_commands():
+        return {robot_id: TeamRobotCommand(brake=True)
+                for robot_id in Protocol.TEAM_ROBOT_IDS}
+
+    def _send_team_frame(self):
+        if not self.is_connected:
+            return False
+        sequence = self._team_sequence
+        frame = Protocol.encode_team_velocity(sequence, self._team_commands)
+        self._write_frame(frame, "command")
+        self._team_sequence = (sequence + 1) & 0xFFFF
+        return sequence
 
     def _next_poll_robot_id(self):
         if self.robots.uplink_robot_id is not None:
@@ -121,15 +136,41 @@ class RadioManager(SerialManager):
 
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
         active = self.robots.active_robot
-        if active is None or not active.can_control:
+        kick = int(kick_power) > 0
+        if active is not None and active.can_control and active.robot_id in self._team_commands:
+            self.state.robot_id = active.robot_id
+            self._team_commands[active.robot_id] = TeamRobotCommand(
+                vx=float(vx), vy=float(vy), omega=float(omega),
+                kick_power=kick_power, kick=kick, chip=False,
+                brake=bool(brake), dribbler=False, enabled=True,
+            )
+        sequence = self._send_team_frame()
+        if sequence is False:
             return
-        self.state.robot_id = active.robot_id
-        super().send_command(vx, vy, omega, kick_power, brake)
+        self.command_sent.emit(vx, vy, omega, sequence)
+        # Kick is a one-frame edge. Keep the slot enabled, but never latch its
+        # action bit or power into subsequent team frames.
+        if active is not None and kick and active.robot_id in self._team_commands:
+            self._team_commands[active.robot_id] = replace(
+                self._team_commands[active.robot_id], kick_power=0, kick=False)
+
+    def emergency_stop(self):
+        self._target = (0.0, 0.0, 0.0); self._brake = True
+        self._kick_pending = False
+        self.state.vx = self.state.vy = self.state.omega = 0.0
+        self._team_commands = self._safe_team_commands()
+        try:
+            for _ in range(self.EMERGENCY_SAFE_FRAMES):
+                self._send_team_frame()
+        except Exception as exc:
+            self.error.emit(str(exc))
 
     def disconnect_serial(self, send_brake=True):
-        active = self.robots.active_robot if hasattr(self, "robots") else None
-        if active is not None: self.state.robot_id = active.robot_id
-        super().disconnect_serial(send_brake=send_brake and active is not None)
+        if send_brake and self.is_connected:
+            self.emergency_stop()
+        # The base disconnect safety packet is D0, so it must stay disabled for
+        # MATCH_TRANSPORT_AIRPORT_TEAM. Safety D1 frames were sent above.
+        super().disconnect_serial(send_brake=False)
 
     def discover_robots(self, timeout_ms=DISCOVERY_TIMEOUT_MS):
         if not self.is_connected:
@@ -268,13 +309,24 @@ class RadioManager(SerialManager):
                 self.history.append(data); self.telemetry_received.emit(data)
 
     def select_robot(self, robot_id):
+        if robot_id not in self._team_commands:
+            raise ValueError("AirPort Team control supports robot IDs A, B and C")
         self.robots.select_robot(robot_id)
         # Selection changes only the command destination. Fleet telemetry is
         # scheduled independently by send_telemetry_request().
         self.state.robot_id = robot_id
+        command = self._team_commands[robot_id]
+        self.state.vx, self.state.vy, self.state.omega = command.vx, command.vy, command.omega
 
     def clear_robot_selection(self):
-        if self.robots.active_robot is not None:
-            self.emergency_stop()
+        active = self.robots.active_robot
+        if active is not None and active.robot_id in self._team_commands:
+            self._team_commands[active.robot_id] = TeamRobotCommand(brake=True)
+            try:
+                self._send_team_frame()
+            except Exception as exc:
+                self.error.emit(str(exc))
         self._target = (0.0, 0.0, 0.0); self._brake = True
+        self._kick_pending = False
+        self.state.vx = self.state.vy = self.state.omega = 0.0
         self.robots.clear_selection()

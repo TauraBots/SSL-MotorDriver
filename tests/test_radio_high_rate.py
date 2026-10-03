@@ -100,7 +100,7 @@ class RadioProfileAndSchedulerTests(unittest.TestCase):
             radio.scheduler.next_command_ns = radio.scheduler.next_telemetry_ns = 0
             radio._tick()
         self.assertEqual([frame[2] for _, frame in serial.frames[:2]],
-                         [Protocol.ROBOT_VELOCITY_TYPE, Protocol.TELEMETRY_REQUEST_TYPE])
+                         [Protocol.TEAM_VELOCITY_TYPE, Protocol.TELEMETRY_REQUEST_TYPE])
 
     def test_120_hz_accumulative_deadlines_do_not_drift(self):
         scheduler = RadioScheduler(VALIDATION_120); scheduler.reset(0)
@@ -151,11 +151,11 @@ class RadioProfileAndSchedulerTests(unittest.TestCase):
         self.assertEqual((normal.command_frame_bytes,
                           normal.telemetry_request_frame_bytes,
                           normal.telemetry_fast_response_bytes,
-                          normal.telemetry_full_response_bytes), (19, 10, 34, 51))
+                          normal.telemetry_full_response_bytes), (32, 10, 34, 51))
         self.assertEqual((normal.estimated_protocol_tx_bytes_per_s,
-                          normal.estimated_protocol_rx_bytes_per_s), (430, 255))
+                          normal.estimated_protocol_rx_bytes_per_s), (690, 255))
         self.assertEqual((validation.estimated_protocol_tx_bytes_per_s,
-                          validation.estimated_protocol_rx_bytes_per_s), (3480, 4250))
+                          validation.estimated_protocol_rx_bytes_per_s), (5040, 4250))
         self.assertIn("capacity unknown", airport_ota_capacity_message(NORMAL))
         self.assertIn("exceeds", airport_ota_capacity_message(VALIDATION_120, 1000))
 
@@ -206,7 +206,7 @@ class RadioFakeSerialIntegrationTests(unittest.TestCase):
         full_count = sum(frame[7] == Protocol.TELEMETRY_FLAGS_FULL for frame in request_frames)
         self.assertAlmostEqual(full_count / 5, 10, delta=1)
         kinds = [frame[2] for timestamp, frame in self.serial.frames if timestamp == 0]
-        self.assertTrue(not kinds or kinds[0] == Protocol.ROBOT_VELOCITY_TYPE)
+        self.assertTrue(not kinds or kinds[0] == Protocol.TEAM_VELOCITY_TYPE)
 
     def test_timeout_and_unmatched_late_response_are_counted(self):
         self.serial.latency_ns = 200_000_000

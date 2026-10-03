@@ -40,7 +40,7 @@ class ControlPanel(QWidget):
 
     def reset_joystick(self): self.rotation.blockSignals(True); self.rotation.setValue(0); self.rotation.blockSignals(False); self._rotation = 0.0; self.joystick.reset()
     def set_active_robot(self, robot_id):
-        enabled = bool(robot_id); self.control_target.setText(f"CONTROLLING: ROBOT {robot_id}" if enabled else "NO CONTROL TARGET")
+        enabled = bool(robot_id); self.control_target.setText(f"CONTROL TARGET: ROBOT {robot_id}" if enabled else "NO CONTROL TARGET")
         self.joystick_card.setEnabled(enabled); self.command_card.setEnabled(enabled)
     def set_key(self, key, pressed):
         if key not in self.keys: return

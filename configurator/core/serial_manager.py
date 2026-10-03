@@ -22,7 +22,7 @@ class SerialManager(QObject):
     connected = Signal(str, int, str)
     disconnected = Signal()
     telemetry_received = Signal(dict)
-    # The wire sequence is uint32; PySide's ``int`` signal is signed 32-bit.
+    # Transport sequence (D0 is uint32; AirPort Team D1 is uint16).
     command_sent = Signal(float, float, float, object)
     telemetry_lost = Signal()
     error = Signal(str)
@@ -199,7 +199,8 @@ class SerialManager(QObject):
 
             due = self.scheduler.take_due(now_ns)
             self.link_stats.record_missed(due.command_missed, due.telemetry_missed)
-            # D0 always wins when command and telemetry share a scheduler wake-up.
+            # The command frame (D1 TeamFrame in RadioManager) always wins when
+            # command and telemetry share a scheduler wake-up.
             if due.command:
                 motion = self._limited_motion(now)
                 kick = self._kick_power if self._kick_pending else 0
