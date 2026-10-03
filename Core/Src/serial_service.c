@@ -15,11 +15,12 @@
 #define TELEMETRY_SOF 0xAA55U
 #define COMMAND_PACKET_LEN SERIAL_COMMAND_PACKET_LEN
 #define ROBOT_VELOCITY_PACKET_LEN SERIAL_ROBOT_VELOCITY_PACKET_LEN
+#define TEAM_VELOCITY_PACKET_LEN SERIAL_TEAM_VELOCITY_PACKET_LEN
 #define CONFIG_DISCOVER_PACKET_LEN SERIAL_CONFIG_DISCOVER_PACKET_LEN
 #define CONFIG_SET_ID_PACKET_LEN SERIAL_CONFIG_SET_ID_PACKET_LEN
 #define CONFIG_RESPONSE_PACKET_LEN SERIAL_CONFIG_RESPONSE_PACKET_LEN
 #define CONFIG_SET_MOTION_PACKET_LEN SERIAL_CONFIG_SET_MOTION_PACKET_LEN
-#define RX_FRAME_LEN_MAX SERIAL_CONFIG_SET_MOTION_PACKET_LEN
+#define RX_FRAME_LEN_MAX SERIAL_TEAM_VELOCITY_PACKET_LEN
 #define TELEMETRY_REQUEST_PACKET_LEN SERIAL_TELEMETRY_REQUEST_PACKET_LEN
 #define TELEMETRY_RESPONSE_PACKET_LEN_MAX SERIAL_TELEMETRY_RESPONSE_PACKET_LEN_MAX
 #define DISCOVERY_REQUEST_PACKET_LEN SERIAL_DISCOVERY_REQUEST_PACKET_LEN
@@ -34,6 +35,7 @@
 #define TX_TYPE_CONFIG_SET_MOTION_RESPONSE SERIAL_TYPE_CONFIG_SET_MOTION_RESPONSE
 #define RX_TYPE_TELEMETRY_REQUEST SERIAL_TYPE_TELEMETRY_REQUEST
 #define RX_TYPE_ROBOT_VELOCITY SERIAL_TYPE_ROBOT_VELOCITY
+#define RX_TYPE_TEAM_VELOCITY SERIAL_TYPE_TEAM_VELOCITY
 #define ROBOT_VELOCITY_PROTOCOL_VERSION SERIAL_ROBOT_VELOCITY_PROTOCOL_VERSION
 #define TX_TYPE_TELEMETRY_RESPONSE SERIAL_TYPE_TELEMETRY_RESPONSE
 #define RX_TYPE_DISCOVERY_REQUEST SERIAL_TYPE_DISCOVERY_REQUEST
@@ -108,11 +110,15 @@ static UART_HandleTypeDef *serial_uart = NULL;
 static DMA_HandleTypeDef *serial_rx_dma = NULL;
 static CommMode serial_comm_mode = (CommMode)TAURA_COMM_MODE;
 static CrsfParser crsf_parser;
+static uint8_t team_rx_frame[TEAM_VELOCITY_PACKET_LEN];
+static uint8_t team_rx_len = 0U;
 
 static void Serial_ProcessRx(void);
 static void Serial_ProcessByte(uint8_t b);
 static void Serial_ProcessBenchByte(uint8_t b);
 static void Serial_ProcessMatchByte(uint8_t b);
+static void Serial_ProcessAirportTeamByte(uint8_t b);
+static void Serial_ResetAirportTeamParser(void);
 static void Serial_ProcessCommandPacket(const uint8_t *buf);
 static void Serial_TelemetryTask(void);
 static void Serial_DiscoveryTask(void);
@@ -200,6 +206,11 @@ static void Serial_ProcessRobotVelocityPacket(const uint8_t *buf)
 
 static uint8_t Serial_SendConfigResponse(uint8_t type, uint8_t status)
 {
+  if (serial_comm_mode != COMM_MODE_BENCH)
+  {
+    return 0U;
+  }
+
   uint8_t response[CONFIG_RESPONSE_PACKET_LEN] = {0};
   uint8_t uid[ROBOT_UID_LEN];
   RobotUidRead(uid);
@@ -411,6 +422,12 @@ static void Serial_ProcessByte(uint8_t b)
 
 static void Serial_ProcessMatchByte(uint8_t b)
 {
+  if (TAURA_MATCH_TRANSPORT == MATCH_TRANSPORT_AIRPORT_TEAM)
+  {
+    Serial_ProcessAirportTeamByte(b);
+    return;
+  }
+
   serial_dbg_rx_bytes++;
   CrsfChannels channels;
   const CrsfParseResult result =
@@ -423,6 +440,85 @@ static void Serial_ProcessMatchByte(uint8_t b)
   else if (result == CRSF_PARSE_BAD_CRC)
   {
     serial_dbg_rx_bad_crc++;
+  }
+}
+
+static void Serial_ResetAirportTeamParser(void)
+{
+  team_rx_len = 0U;
+}
+
+static void Serial_ProcessAirportTeamByte(uint8_t b)
+{
+  serial_dbg_rx_bytes++;
+  if (team_rx_len == 0U)
+  {
+    if (b == RX_SOF0)
+    {
+      team_rx_frame[0] = b;
+      team_rx_len = 1U;
+    }
+    return;
+  }
+
+  if (team_rx_len == 1U)
+  {
+    if (b == RX_SOF1)
+    {
+      team_rx_frame[1] = b;
+      team_rx_len = 2U;
+    }
+    else if (b != RX_SOF0)
+    {
+      Serial_ResetAirportTeamParser();
+    }
+    return;
+  }
+
+  if ((team_rx_len == 2U) && (b != RX_TYPE_TEAM_VELOCITY))
+  {
+    Serial_ResetAirportTeamParser();
+    if (b == RX_SOF0)
+    {
+      team_rx_frame[0] = b;
+      team_rx_len = 1U;
+    }
+    return;
+  }
+
+  team_rx_frame[team_rx_len++] = b;
+  if (team_rx_len == TEAM_VELOCITY_PACKET_LEN)
+  {
+    SerialTeamVelocityFrame decoded;
+    const SerialTeamDecodeResult decode_result =
+        SerialProtocol_DecodeTeamVelocity(team_rx_frame, team_rx_len, &decoded);
+    MatchControl_HandleTeamFrame(team_rx_frame, team_rx_len);
+    if (decode_result == SERIAL_TEAM_DECODE_OK)
+    {
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+
+    uint8_t next_start = TEAM_VELOCITY_PACKET_LEN;
+    for (uint8_t i = 1U; i < (TEAM_VELOCITY_PACKET_LEN - 2U); i++)
+    {
+      if ((team_rx_frame[i] == RX_SOF0) &&
+          (team_rx_frame[i + 1U] == RX_SOF1) &&
+          (team_rx_frame[i + 2U] == RX_TYPE_TEAM_VELOCITY))
+      {
+        next_start = i;
+        break;
+      }
+    }
+    if (next_start < TEAM_VELOCITY_PACKET_LEN)
+    {
+      team_rx_len = TEAM_VELOCITY_PACKET_LEN - next_start;
+      memmove(team_rx_frame, &team_rx_frame[next_start], team_rx_len);
+    }
+    else
+    {
+      Serial_ResetAirportTeamParser();
+    }
   }
 }
 
@@ -541,7 +637,8 @@ static void Serial_ProcessBenchByte(uint8_t b)
 
 static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_prio)
 {
-  if ((data == NULL) || (len == 0U) || (len >= UART_TX_BUF_SIZE))
+  if ((serial_comm_mode != COMM_MODE_BENCH) || (data == NULL) ||
+      (len == 0U) || (len >= UART_TX_BUF_SIZE))
   {
     return 0U;
   }
@@ -579,7 +676,8 @@ static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_pr
 
 static void Serial_TxKick(void)
 {
-  if ((uart_tx_busy != 0U) || (uart_tx_q_count == 0U))
+  if ((serial_comm_mode != COMM_MODE_BENCH) ||
+      (uart_tx_busy != 0U) || (uart_tx_q_count == 0U))
   {
     return;
   }
@@ -640,6 +738,7 @@ static void Serial_UartRecoveryTask(void)
   if (serial_comm_mode == COMM_MODE_MATCH)
   {
     CrsfParser_Init(&crsf_parser);
+    Serial_ResetAirportTeamParser();
     MatchControl_Init();
   }
   if (HAL_UART_Receive_DMA(serial_uart, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE) == HAL_OK)
@@ -763,6 +862,7 @@ HAL_StatusTypeDef SerialService_Init(UART_HandleTypeDef *uart,
   serial_uart = uart;
   serial_rx_dma = rx_dma;
   CrsfParser_Init(&crsf_parser);
+  Serial_ResetAirportTeamParser();
   MatchControl_Init();
   const HAL_StatusTypeDef status =
       HAL_UART_Receive_DMA(serial_uart, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE);
@@ -818,6 +918,7 @@ void SerialService_SetCommMode(CommMode mode)
 {
   serial_comm_mode = mode;
   CrsfParser_Init(&crsf_parser);
+  Serial_ResetAirportTeamParser();
   MatchControl_Init();
   telemetry_response_pending = 0U;
   discovery_response_pending = 0U;

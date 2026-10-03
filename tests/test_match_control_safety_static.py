@@ -40,7 +40,7 @@ class MatchControlSafetyStaticTests(unittest.TestCase):
 
     def test_watchdog_forces_safe_after_command_timeout(self):
         body = self.body_of(self.match_control, "MatchControl_Task")
-        self.assertIn("MATCH_COMMAND_TIMEOUT_MS", body)
+        self.assertIn("command_timeout_ms", body)
         self.assertIn("stats.watchdog_trips++", body)
         self.assertIn("AppC_ForceSafeState();", body)
 

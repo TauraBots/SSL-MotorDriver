@@ -36,7 +36,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define USART2_CONFIGURED_BAUD \
-  ((TAURA_COMM_MODE == COMM_MODE_MATCH) ? MATCH_CRSF_UART_BAUD : BENCH_UART_BAUD)
+  ((TAURA_COMM_MODE != COMM_MODE_MATCH) ? BENCH_UART_BAUD : \
+   ((TAURA_MATCH_TRANSPORT == MATCH_TRANSPORT_AIRPORT_TEAM) ? \
+    MATCH_AIRPORT_UART_BAUD : MATCH_CRSF_UART_BAUD))
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/

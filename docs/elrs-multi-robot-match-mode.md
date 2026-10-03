@@ -12,23 +12,19 @@ Bench mode usa o protocolo Quad-MD existente em `USART2` para `D0`, `E0`,
 
 ```text
 MATCH MODE
-ROS2 / PC
-  |
-  v
-CRSF TX bridge
-  |
-  v
-ELRS TX normal
-  |
-  +-- RX A -> STM32 A
-  +-- RX B -> STM32 B
-  +-- RX C -> STM32 C
+PC -> USB -> Jumper AION Nano TX
+              AirPort
+                 |
+                 +-- RX A -> STM32 A
+                 +-- RX B -> STM32 B
+                 +-- RX C -> STM32 C
 ```
 
-Match mode usa ExpressLRS normal com CRSF `RC_CHANNELS_PACKED`. Todos os RX
-compartilham a mesma binding phrase e recebem os mesmos 16 canais. Cada STM32
-usa seu `robot_id` salvo para escolher apenas o bloco de canais correspondente.
-A telemetria ELRS/Quad-MD fica desabilitada nesse modo.
+O transporte principal de match usa AirPort como UART transparente. Um unico
+pacote Quad-MD D1 carrega comandos diferentes para A, B e C; todos os RX recebem
+os mesmos bytes e cada STM32 escolhe somente o slot do seu `robot_id` persistente.
+O STM32 nao transmite telemetria, discovery nem respostas de configuracao nesse
+modo. O backend CRSF normal continua disponivel como alternativa experimental.
 
 ## Configuracao
 
@@ -42,14 +38,25 @@ Para firmware de partida, compilar com:
 
 ```c
 #define TAURA_COMM_MODE COMM_MODE_MATCH
-#define TAURA_MATCH_TRANSPORT MATCH_TRANSPORT_CHANNELS
+#define TAURA_MATCH_TRANSPORT MATCH_TRANSPORT_AIRPORT_TEAM
 ```
 
-Os bauds da `USART2` sao escolhidos automaticamente por `TAURA_COMM_MODE`:
+`MATCH_TRANSPORT_AIRPORT_TEAM` e o default quando
+`TAURA_MATCH_TRANSPORT` nao e definido. Os bauds sao escolhidos por modo e
+transporte:
 
 ```text
-quadmd_bench: USART2 = 9600 baud, 8N1
-quadmd_match: USART2 = 420000 baud, 8N1
+BENCH                         USART2 = 9600 baud, 8N1
+MATCH + AIRPORT_TEAM         USART2 = 9600 baud, 8N1
+MATCH + CHANNELS/TEAMFRAME   USART2 = 420000 baud, 8N1
+```
+
+Para o enlace AirPort de partida, configure as tres pontas em `9600`:
+
+```text
+TX AirPort baud = 9600
+RX AirPort baud = 9600
+STM32 USART2    = 9600
 ```
 
 O arquivo `YahBoom-4ch.ioc` permanece com `USART2.BaudRate=9600`. Esse e o
@@ -58,9 +65,9 @@ gerado normal e compativel com o perfil bench. Depois que todos os perifericos
 sao inicializados, `main()` chama `ApplyCommModeUartBaud()` dentro de um bloco
 `USER CODE`. A funcao tambem esta em bloco protegido e:
 
-- mantem `9600` sem reinicializacao no build bench;
-- troca `huart2.Init.BaudRate` para `420000` e chama `HAL_UART_Init()` novamente
-  no build match, antes de `SerialService_Init()` iniciar DMA/recepcao.
+- mantem `9600` sem reinicializacao no bench e no match AirPort Team;
+- troca para `420000` e chama `HAL_UART_Init()` novamente apenas nos transportes
+  match baseados em CRSF, antes de `SerialService_Init()` iniciar DMA/recepcao.
 
 Assim, uma nova geracao pode reescrever a linha de baud dentro de
 `MX_USART2_UART_Init()` para `9600`, conforme o `.ioc`, sem perder a selecao de
@@ -68,9 +75,9 @@ match. Nao mova a selecao dinamica de volta para essa linha gerada.
 
 Para verificar em firmware, coloque um breakpoint depois de
 `ApplyCommModeUartBaud()` e inspecione `huart2.Init.BaudRate`. O valor deve ser
-`9600` com `TAURA_COMM_MODE=COMM_MODE_BENCH` e `420000` com
-`TAURA_COMM_MODE=COMM_MODE_MATCH`. Uma verificacao eletrica equivalente pode
-ser feita medindo `PA2` (USART2 TX) com analisador logico configurado para 8N1.
+`9600` no bench/AirPort Team e `420000` no match CRSF. No AirPort Team, `PA2`
+permanece configurado como TX por compatibilidade com CubeMX, mas a aplicacao nao
+envia bytes; a recepcao pode ser verificada em `PA3` com analisador logico 8N1.
 
 Nao houve alteracao de pinagem. A placa documentada possui `USART2` em
 `PA2/PA3` com DMA; nenhum segundo UART foi configurado sem conflito no `.ioc`.
@@ -89,7 +96,14 @@ quadmd_bench
   optional/default:
     TAURA_COMM_MODE=COMM_MODE_BENCH
 
-quadmd_match
+quadmd_match_airport
+  symbols:
+    USE_HAL_DRIVER
+    STM32F103xE
+    TAURA_COMM_MODE=COMM_MODE_MATCH
+    TAURA_MATCH_TRANSPORT=MATCH_TRANSPORT_AIRPORT_TEAM  (opcional/default)
+
+quadmd_match_crsf
   symbols:
     USE_HAL_DRIVER
     STM32F103xE
@@ -99,10 +113,63 @@ quadmd_match
 
 Em STM32CubeIDE: Project Properties -> C/C++ Build -> Settings -> MCU GCC
 Compiler -> Preprocessor, duplique a configuracao existente e adicione os
-simbolos acima ao perfil `quadmd_match`. Repita tambem no MCU G++ Compiler para
+simbolos acima ao perfil escolhido. Repita tambem no MCU G++ Compiler para
 os arquivos C++.
 
-## 333 Full / 16ch Rate/2
+## D1 AirPort Team
+
+O frame e atomico, possui 32 bytes e usa CRC16-CCITT-FALSE, o mesmo algoritmo
+do protocolo Quad-MD existente. O valor numerico do SOF e `0xAA55`; na linha,
+os bytes aparecem como `55 AA`.
+
+```text
+offset  tamanho  campo
+0       2        SOF = 55 AA
+2       1        TYPE = D1
+3       1        VERSION = 1
+4       2        SEQUENCE uint16 little-endian
+6       8        Robot A: vx, vy, omega, kick_power, flags
+14      8        Robot B: vx, vy, omega, kick_power, flags
+22      8        Robot C: vx, vy, omega, kick_power, flags
+30      2        CRC16 little-endian sobre bytes 0..29
+```
+
+Cada slot de robo usa:
+
+```text
++0  vx          int16 little-endian, m/s x 1000
++2  vy          int16 little-endian, m/s x 1000
++4  omega       int16 little-endian, rad/s x 1000
++6  kick_power  uint8, limitado a 0..100 pelo caminho comum
++7  flags       uint8
+```
+
+Flags:
+
+```text
+bit 0 kick
+bit 1 chip
+bit 2 brake
+bit 3 dribbler
+bit 4 enabled
+bits 5..7 reservados
+```
+
+`enabled=0` aplica safe state somente ao robo daquele slot. O comando so e
+aplicado depois de SOF, tamanho, tipo, versao, CRC e sequence validos. Sequence
+duplicada ou antiga nao atualiza o comando nem repete kick. Kick e gerado apenas
+na borda `0 -> 1`; o primeiro frame observado estabelece o baseline.
+
+O watchdog AirPort usa `MATCH_AIRPORT_COMMAND_TIMEOUT_MS=100`. Inicializacao,
+ausencia de frame e timeout aplicam safe state. Os contadores ficam em
+`MatchControlStats`: `team_frames_ok`, `team_frames_bad_crc`,
+`team_frames_bad_version`, `team_frames_duplicate` e `team_frames_timeout`.
+
+Um frame de 32 bytes ocupa aproximadamente `33,3 ms` em 9600 baud/8N1. Assim,
+50 Hz nao e fisicamente possivel nesse baud; para o primeiro teste, use no
+maximo cerca de 20--25 Hz para manter folga no enlace e no timeout de 100 ms.
+
+## Backend alternativo: CRSF 333 Full / 16ch Rate/2
 
 O primeiro backend usa os 16 canais CRSF diretamente. O frame CRSF aceito e o
 padrao `RC_CHANNELS_PACKED` (`0x16`) com CRC8 DVB-S2 valido.
@@ -189,7 +256,8 @@ O match mode tambem possui watchdog independente:
 ```
 
 Se nenhum CRSF valido chegar dentro desse intervalo, o firmware chama o estado
-seguro e nao mantem o ultimo comando indefinidamente.
+seguro e nao mantem o ultimo comando indefinidamente. AirPort Team usa o timeout
+separado de 100 ms descrito acima.
 
 ## CRSF UART
 
@@ -229,9 +297,11 @@ A arquitetura ja reserva o backend:
 ```text
 MATCH_TRANSPORT_CHANNELS
 MATCH_TRANSPORT_TEAMFRAME
+MATCH_TRANSPORT_AIRPORT_TEAM
 ```
 
-TeamFrame e experimental e nao substitui o modo 333 Full. A ideia e usar CH1-CH4
+`MATCH_TRANSPORT_TEAMFRAME` continua experimental e nao e o D1 AirPort Team. A
+ideia desse backend antigo e usar CH1-CH4
 como barramento de dados de 40 bits por atualizacao e montar um frame atomico de
 128 bits em 4 fragments:
 
@@ -247,7 +317,7 @@ pode ser aplicado apos receber os 4 fragments da mesma sequencia e validar o CRC
 Fragmento faltante, duplicado de sequencia antiga, mistura de sequencias ou CRC
 errado descartam o frame.
 
-## Host PC
+## Host PC do backend CRSF alternativo
 
 `crsf-host/crsf_match.py` contem um modulo independente para:
 
@@ -291,10 +361,16 @@ frames seguros (default `20`) antes de fechar a serial.
 
 ## Pontos que exigem teste fisico
 
-- Confirmar baud/configuracao UART exata esperada pelo RX ELRS em modo CRSF.
+- Confirmar AirPort transparente em 9600 baud no AION Nano TX e nos tres RX.
+- Confirmar que os tres RX entregam exatamente o mesmo D1 e que cada STM32 usa
+  somente o slot correspondente ao seu `robot_id`.
+- Verificar com analisador logico que `PA2` nao transmite no match AirPort Team.
+- Medir a taxa sustentavel do frame de 32 bytes; iniciar em 20 Hz e ajustar sem
+  ultrapassar o limite fisico proximo de 30 Hz em 9600/8N1.
+- Medir jitter/perda real e ajustar `MATCH_AIRPORT_COMMAND_TIMEOUT_MS` se 100 ms
+  nao der margem adequada ao enlace.
 - Validar o sentido fisico de `vx`, `vy` e `omega` em cada robo.
-- Confirmar que o TX esta em 333 Hz Full Resolution / 16ch Rate/2.
-- Medir jitter/perda real e ajustar `MATCH_COMMAND_TIMEOUT_MS` se 50 ms ficar
-  agressivo para o enlace configurado.
+- Para o backend alternativo CRSF, confirmar 420000 baud e 333 Hz Full
+  Resolution / 16ch Rate/2.
 - Integrar o evento de kick ao hardware do kicker quando esse atuador estiver
   disponivel no firmware.
