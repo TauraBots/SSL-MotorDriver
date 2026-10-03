@@ -16,6 +16,8 @@ from .serial_manager import SerialManager
 class RadioManager(SerialManager):
     DISCOVERY_TIMEOUT_MS = 500
     MAX_FRAMES_PER_TICK = 32
+    UPLINK_TIMEOUT_S = 1.5
+    UPLINK_PROBE_INTERVAL_MS = 500
     discovery_started = Signal()
     discovery_finished = Signal(object)
 
@@ -24,7 +26,10 @@ class RadioManager(SerialManager):
         self._discovery_sent_at = {}; self._discovery_seen = set(); self._discovery_generation = 0
         self._config_action = None; self._config_generation = 0
         self._config_responses = []; self._config_received_bytes = 0
-        self._fleet_poll_index = 0; self._telemetry_requests = {}; self._last_full_request_ns = {}
+        self._uplink_probe_index = 0; self._last_probe_ns = None
+        self._telemetry_requests = {}; self._last_full_request_ns = {}
+        self.uplink_timeout_s = self.UPLINK_TIMEOUT_S
+        self.uplink_probe_interval_ms = self.UPLINK_PROBE_INTERVAL_MS
         self._fleet_health_timer = QTimer(self); self._fleet_health_timer.setInterval(250)
         self._fleet_health_timer.timeout.connect(self._expire_stale_robots); self._fleet_health_timer.start()
         self.connected.connect(lambda port, baud, robot_id: self.robots.set_radio_connected(True, port=port, baud=baud))
@@ -37,20 +42,33 @@ class RadioManager(SerialManager):
         if latency is None: return
         self.robots.update_telemetry(data, latency)
 
+    @property
+    def uplink_robot_id(self):
+        return self.robots.uplink_robot_id
+
     def _expire_stale_robots(self):
-        count = max(1, len(self.robots.discovered_robots))
-        self.robots.expire_stale(timeout_s=max(1.5, count * 0.5))
+        previous_uplink = self.robots.uplink_robot_id
+        self.robots.expire_stale(timeout_s=self.uplink_timeout_s)
+        if previous_uplink is not None and self.robots.uplink_robot_id is None:
+            self.link_stats.reset_uplink_window()
 
     def connect_serial(self, port, baud, robot_id):
         self._telemetry_requests.clear(); self._last_full_request_ns.clear()
-        self._fleet_poll_index = 0
+        self._uplink_probe_index = 0; self._last_probe_ns = None
         super().connect_serial(port, baud, robot_id)
 
     def _next_poll_robot_id(self):
-        candidates = self.robots.discovered_robots
-        if candidates:
-            return candidates[self._fleet_poll_index % len(candidates)].robot_id
-        return self.state.robot_id
+        if self.robots.uplink_robot_id is not None:
+            return self.robots.uplink_robot_id
+        candidates = self._probe_robot_ids()
+        return candidates[self._uplink_probe_index % len(candidates)]
+
+    def _probe_robot_ids(self):
+        candidates = tuple(robot.robot_id for robot in self.robots.discovered_robots
+                           if robot.robot_id in ("A", "B", "C"))
+        if not candidates:
+            candidates = ("A", "B", "C")
+        return candidates
 
     def _telemetry_flags_for_next_request(self, now_ns):
         if not self.profile.split_telemetry:
@@ -63,21 +81,28 @@ class RadioManager(SerialManager):
         return Protocol.TELEMETRY_FLAGS_FAST
 
     def send_telemetry_request(self, flags=Protocol.TELEMETRY_FLAGS_FULL):
-        if not self.is_connected: return
-        robot_id = self._next_poll_robot_id()
-        candidates = self.robots.discovered_robots
-        if candidates:
-            self._fleet_poll_index = (self._fleet_poll_index + 1) % len(candidates)
-        self._request_sequence = (self._request_sequence + 1) & 0xFFFF
+        if not self.is_connected: return False
         sent_ns = time.monotonic_ns()
+        probing = self.robots.uplink_robot_id is None
+        probe_interval_ns = self.uplink_probe_interval_ms * 1_000_000
+        if (probing and self._last_probe_ns is not None and
+                sent_ns - self._last_probe_ns < probe_interval_ns):
+            return False
+        robot_id = self._next_poll_robot_id()
+        if probing:
+            candidates = self._probe_robot_ids()
+            self._uplink_probe_index = (self._uplink_probe_index + 1) % len(candidates)
+            self._last_probe_ns = sent_ns
+        self._request_sequence = (self._request_sequence + 1) & 0xFFFF
         self._telemetry_requests[self._request_sequence] = {
             "request_sequence": self._request_sequence, "robot_id": robot_id,
-            "sent_time_ns": sent_ns, "flags": flags,
+            "sent_time_ns": sent_ns, "flags": flags, "probe": probing,
         }
         if flags == Protocol.TELEMETRY_FLAGS_FULL:
             self._last_full_request_ns[robot_id] = sent_ns
         self._write_frame(Protocol.encode_telemetry_request(
             robot_id, self._request_sequence, flags), "telemetry_request", sent_ns)
+        return True
 
     def set_radio_profile(self, profile):
         super().set_radio_profile(profile)
@@ -88,8 +113,11 @@ class RadioManager(SerialManager):
         expired = [sequence for sequence, request in self._telemetry_requests.items()
                    if now_ns - request["sent_time_ns"] > timeout_ns]
         for sequence in expired:
-            del self._telemetry_requests[sequence]
-            self.link_stats.record_timeout(now_ns)
+            request = self._telemetry_requests.pop(sequence)
+            if request.get("probe"):
+                self.link_stats.record_probe_timeout()
+            else:
+                self.link_stats.record_timeout(now_ns)
 
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
         active = self.robots.active_robot
@@ -210,6 +238,8 @@ class RadioManager(SerialManager):
                 sent_at = self._discovery_sent_at.get(data["request_sequence"])
                 if sent_at is None: continue
                 latency = max(0, int((now_s - sent_at) * 1000)); self._discovery_seen.add(data["robot_id"])
+                if self.robots.uplink_robot_id != data["robot_id"]:
+                    self.link_stats.reset_uplink_window()
                 self.robots.handle_discovery_response(data, latency)
             elif packet_type in (Protocol.CONFIG_DISCOVER_RESPONSE_TYPE,
                                   Protocol.CONFIG_SET_ID_RESPONSE_TYPE,
@@ -230,6 +260,8 @@ class RadioManager(SerialManager):
                     self.link_stats.record_unmatched(); continue
                 del self._telemetry_requests[data["request_sequence"]]
                 data["latency_ms"] = max(0.0, (now_ns - request["sent_time_ns"]) / 1_000_000)
+                if self.robots.uplink_robot_id != data["robot_id"]:
+                    self.link_stats.reset_uplink_window()
                 self.link_stats.record_response(now_ns, data["latency_ms"])
                 self._last_telemetry = now_s; self._lost_emitted = False
                 if data["robot_id"] == self.state.robot_id: self.state.apply_telemetry(data)

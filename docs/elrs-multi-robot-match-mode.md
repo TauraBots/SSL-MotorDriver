@@ -24,8 +24,9 @@ O transporte principal de match usa AirPort como UART transparente. Um unico
 pacote Quad-MD D1 carrega comandos diferentes para A, B e C; todos os RX recebem
 os mesmos bytes e cada STM32 escolhe somente o slot do seu `robot_id` persistente.
 O uplink e estritamente solicitado: E0 pode produzir E1 somente no robo
-enderecado, e E2 pode produzir E3 em um slot de discovery. Respostas de
-configuracao e qualquer transmissao espontanea continuam bloqueadas nesse modo.
+enderecado, E2 pode produzir E3 em um slot de discovery e operacoes de service
+F0/F1/F4 podem produzir F2/F3/F5. Qualquer transmissao espontanea continua
+bloqueada nesse modo.
 O backend CRSF normal continua disponivel como alternativa experimental.
 
 ## Configuracao
@@ -79,7 +80,7 @@ Para verificar em firmware, coloque um breakpoint depois de
 `ApplyCommModeUartBaud()` e inspecione `huart2.Init.BaudRate`. O valor deve ser
 `9600` no bench/AirPort Team e `420000` no match CRSF. No AirPort Team, `PA2`
 permanece configurado como TX por compatibilidade com CubeMX e transmite apenas
-respostas E1/E3 solicitadas; a recepcao pode ser verificada em `PA3` com
+respostas E1/E3/F2/F3/F5 solicitadas; a recepcao pode ser verificada em `PA3` com
 analisador logico 8N1.
 
 Nao houve alteracao de pinagem. A placa documentada possui `USART2` em
@@ -174,9 +175,10 @@ maximo cerca de 20--25 Hz para manter folga no enlace e no timeout de 100 ms.
 
 ## Uplink solicitado no AirPort Team
 
-O parser de match aceita `D1`, `E0` e `E2`. Protocolos de configuracao, `D0` e
-demais tipos continuam ignorados. O envio tambem possui uma barreira independente:
-em `MATCH_TRANSPORT_AIRPORT_TEAM`, a fila DMA aceita somente `E1` e `E3`.
+O parser de match aceita `D1`, `E0`, `E2`, `F0`, `F1` e `F4`. `D0` e demais
+tipos continuam ignorados. O envio possui uma barreira independente: em
+`MATCH_TRANSPORT_AIRPORT_TEAM`, a fila DMA aceita somente `E1`, `E3`, `F2`,
+`F3` e `F5`.
 
 - `E0 TELEMETRY_REQUEST` sempre deve conter um `robot_id` A/B/C. Somente o
   STM32 com ID configurado igual responde, nunca ha resposta a broadcast, e E1
@@ -194,6 +196,46 @@ uplink, portanto o watchdog de comando permanece ativo durante a espera de E1/E3
 Os contadores de diagnostico sao `match_telemetry_requests`,
 `match_telemetry_responses`, `match_discovery_requests`,
 `match_discovery_responses` e `match_uplink_dropped_busy`.
+
+### Configuracao de service F0--F5
+
+O mesmo firmware MATCH pode executar discovery de placas por UID (`F0/F2`),
+alterar o Robot ID (`F1/F3`) e gravar limites de movimento (`F4/F5`). As
+respostas usam a fila TX por DMA; D1 e o watchdog continuam sendo processados
+enquanto uma resposta aguarda. F1 e F4 exigem CRC, UID exato e a chave de
+configuracao existente, e forcam safe state antes da tentativa de gravacao.
+
+F0 conserva o atraso derivado de nonce + UID para reduzir colisoes. Entretanto,
+os testes fisicos mostraram que o uplink AirPort com varios RX nao funciona como
+um barramento bidirecional confiavel. Discovery de placas pode retornar apenas
+uma parte dos RX ativos. Use como procedimento suportado de manutencao:
+
+1. mantenha somente o robo/RX alvo ligado;
+2. conecte o Configurator em 9600 baud;
+3. use `CONFIGURACAO > DESCOBRIR PLACAS` e confirme o UID;
+4. grave ID ou limites, se necessario;
+5. desligue esse robo antes de repetir no proximo.
+
+Os contadores adicionais observaveis no debugger sao
+`match_config_discover_requests/responses`,
+`match_config_set_id_requests/responses` e
+`match_config_motion_requests/responses`.
+
+### Modelo do Configurator para multi-RX
+
+Os testes fisicos confirmaram broadcast de downlink para varios RX, mas somente
+um RX entrega uplink AirPort ao TX/PC por vez. Por isso, o Configurator separa:
+
+- `registered`: robo conhecido que pode continuar recebendo D1;
+- `telemetry online`: robo com E1/E3 recente;
+- `active_robot`: alvo escolhido pelo operador para controle;
+- `uplink_robot`: RX que atualmente consegue responder ao PC.
+
+Quando existe `uplink_robot`, E0 e enviado somente para ele. Apos 1,5 s sem
+resposta, o robo permanece registrado, passa para `NO TELEMETRY`, o uplink e
+limpo e inicia um probe lento entre os IDs registrados A/B/C. Timeouts desse
+probe sao contabilizados separadamente e nao degradam a estatistica principal
+do link. Uma resposta E1 ou E3 valida fixa imediatamente o novo uplink.
 
 ## Backend alternativo: CRSF 333 Full / 16ch Rate/2
 

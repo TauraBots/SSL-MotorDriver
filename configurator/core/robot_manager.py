@@ -12,6 +12,7 @@ class RobotManager(QObject):
     system_state_changed = Signal(object)
     fleet_changed = Signal(object)
     active_robot_changed = Signal(object)
+    uplink_robot_changed = Signal(object)
     robot_updated = Signal(object)
 
     def __init__(self, parent=None):
@@ -24,6 +25,14 @@ class RobotManager(QObject):
     @property
     def active_robot(self):
         return self._robots.get(self.system_state.active_robot_id)
+
+    @property
+    def uplink_robot_id(self):
+        return self.system_state.uplink_robot_id
+
+    @property
+    def uplink_robot(self):
+        return self._robots.get(self.system_state.uplink_robot_id)
 
     def ensure_robot(self, robot_id):
         if robot_id not in self._robots: self._robots[robot_id] = RobotState(robot_id=robot_id)
@@ -52,11 +61,14 @@ class RobotManager(QObject):
         if not connected:
             for robot in self._robots.values(): robot.connected = False; robot.status = "OFFLINE"
             self.system_state.active_robot_id = None
+            self.set_uplink_robot(None)
         self._refresh_system(); self.fleet_changed.emit(self.robots)
 
     def update_telemetry(self, data, latency_ms):
-        robot = self.ensure_robot(data["robot_id"]); robot.apply_telemetry(data); robot.latency_ms = latency_ms; robot.last_seen = time.monotonic()
-        self.system_state.latency_ms = latency_ms; self._refresh_system(); self.robot_updated.emit(robot); self.fleet_changed.emit(self.robots)
+        robot = self.ensure_robot(data["robot_id"]); robot.apply_telemetry(data)
+        robot.discovered = True; robot.latency_ms = latency_ms; robot.last_seen = time.monotonic()
+        self.set_uplink_robot(robot.robot_id, latency_ms)
+        self._refresh_system(); self.robot_updated.emit(robot); self.fleet_changed.emit(self.robots)
 
     def handle_discovery_response(self, data, latency_ms):
         robot_id, uid = data["robot_id"], data["uid"]
@@ -79,6 +91,7 @@ class RobotManager(QObject):
         discovery_status = data.get("status", 0)
         robot.fault_status = discovery_status >> 1
         robot.status = "WARNING" if robot.fault_status else "ONLINE"
+        self.set_uplink_robot(robot_id, latency_ms)
         self._refresh_system(); self.robot_updated.emit(robot)
         if previous_id is not None and previous_id != robot_id:
             self.active_robot_changed.emit(robot if self.system_state.active_robot_id == robot_id else self.active_robot)
@@ -95,9 +108,25 @@ class RobotManager(QObject):
             stale = robot.last_seen is None or now - robot.last_seen > timeout_s
             if robot.discovered and robot.robot_id not in seen_robot_ids and stale:
                 self._mark_no_telemetry(robot)
+                if robot.last_seen is None:
+                    robot.status = "NO TELEMETRY"
         active = self.active_robot
         if active is not None and not active.connected:
             self.active_robot_changed.emit(active)
+        self._refresh_system(); self.fleet_changed.emit(self.discovered_robots)
+
+    def set_uplink_robot(self, robot_id, latency_ms=None):
+        previous_id = self.system_state.uplink_robot_id
+        self.system_state.uplink_robot_id = robot_id
+        self.system_state.latency_ms = latency_ms if robot_id is not None else None
+        if previous_id != robot_id:
+            self.uplink_robot_changed.emit(self._robots.get(robot_id))
+
+    def clear_uplink(self, mark_no_telemetry=True):
+        robot = self.uplink_robot
+        if mark_no_telemetry and robot is not None:
+            self._mark_no_telemetry(robot)
+        self.set_uplink_robot(None)
         self._refresh_system(); self.fleet_changed.emit(self.discovered_robots)
 
     def mark_active_lost(self):
@@ -111,6 +140,9 @@ class RobotManager(QObject):
             if (robot.discovered and robot.connected and robot.last_seen is not None and
                     now - robot.last_seen > timeout_s):
                 self._mark_no_telemetry(robot); changed = True
+        uplink = self.uplink_robot
+        if uplink is not None and not uplink.connected:
+            self.set_uplink_robot(None)
         if changed:
             active = self.active_robot
             if active is not None and not active.connected:
@@ -129,6 +161,8 @@ class RobotManager(QObject):
     def _refresh_system(self):
         self.system_state.online_robot_count = sum(robot.connected and robot.discovered
                                                    for robot in self._robots.values())
+        self.system_state.registered_robot_count = sum(robot.discovered
+                                                       for robot in self._robots.values())
         if not self.system_state.radio_connected: self.system_state.system_status = "OFFLINE"
         elif any(robot.status == "WARNING" for robot in self._robots.values() if robot.connected): self.system_state.system_status = "WARNING"
         else: self.system_state.system_status = "READY"

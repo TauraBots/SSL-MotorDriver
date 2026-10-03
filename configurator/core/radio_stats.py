@@ -22,6 +22,7 @@ class RadioLinkSnapshot:
     rx_bytes_per_s: float
     telemetry_unmatched_responses: int
     telemetry_timed_out_requests: int
+    telemetry_probe_timeouts: int
     telemetry_response_loss_percent: float
     latency_last_ms: float | None
     latency_mean_ms: float | None
@@ -42,6 +43,7 @@ class RadioLinkStats:
         self.command_deadlines_missed = self.telemetry_deadlines_missed = 0
         self.tx_bytes_total = self.rx_bytes_total = 0
         self.telemetry_unmatched_responses = self.telemetry_timed_out_requests = 0
+        self.telemetry_probe_timeouts = 0
         self._commands = deque(); self._requests = deque(); self._responses = deque()
         self._tx_bytes = deque(); self._rx_bytes = deque(); self._latencies = deque()
         self._outcomes = deque()
@@ -59,6 +61,13 @@ class RadioLinkStats:
 
     def record_timeout(self, now_ns):
         self.telemetry_timed_out_requests += 1; self._outcomes.append((int(now_ns), True))
+
+    def record_probe_timeout(self):
+        self.telemetry_probe_timeouts += 1
+
+    def reset_uplink_window(self):
+        """Drop latency/loss samples that belong to a previous uplink robot."""
+        self._latencies.clear(); self._outcomes.clear()
 
     def record_unmatched(self):
         self.telemetry_unmatched_responses += 1
@@ -101,6 +110,7 @@ class RadioLinkStats:
             sum(value for _, value in self._tx_bytes) * byte_scale,
             sum(value for _, value in self._rx_bytes) * byte_scale,
             self.telemetry_unmatched_responses, self.telemetry_timed_out_requests,
+            self.telemetry_probe_timeouts,
             (100.0 * losses / considered) if considered else 0.0,
             latencies[-1] if latencies else None,
             (sum(latencies) / len(latencies)) if latencies else None,

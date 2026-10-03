@@ -2,14 +2,18 @@ import struct
 import sys
 import time
 import unittest
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "configurator"))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from core.protocol import Protocol
 from core.robot_manager import RobotManager
+from PySide6.QtWidgets import QApplication
+from ui.fleet_panel import FleetPanel
 
 
 def discovery_frame(robot_id, sequence=7, uid=None, firmware=(1, 2, 3),
@@ -78,6 +82,37 @@ class RobotDiscoveryTests(unittest.TestCase):
         self.assertEqual(robots["B"].status, "NO TELEMETRY")
         self.assertTrue(robots["B"].can_control)
         self.assertEqual(self.manager.system_state.online_robot_count, 1)
+        self.assertEqual(self.manager.system_state.registered_robot_count, 2)
+        self.assertEqual(self.manager.uplink_robot_id, "A")
+
+    def test_single_discovery_reply_keeps_registered_fleet_and_ui_states(self):
+        self.manager.register_expected_robots(["A", "B"])
+        data = Protocol.parse_discovery_response(discovery_frame("A"))
+        self.manager.handle_discovery_response(data, 20)
+        self.manager.complete_discovery({"A"})
+
+        robot_a = self.manager.ensure_robot("A")
+        robot_b = self.manager.ensure_robot("B")
+        self.assertTrue(robot_a.connected)
+        self.assertFalse(robot_b.connected)
+        self.assertTrue(robot_b.discovered)
+        self.assertEqual(robot_b.status, "NO TELEMETRY")
+        self.assertEqual(self.manager.uplink_robot_id, "A")
+        self.assertEqual((self.manager.system_state.registered_robot_count,
+                          self.manager.system_state.online_robot_count), (2, 1))
+
+        app = QApplication.instance() or QApplication([])
+        panel = FleetPanel()
+        try:
+            panel.set_fleet(self.manager.discovered_robots, None,
+                            self.manager.uplink_robot_id)
+            self.assertEqual(panel.summary.text(), "2 REGISTERED / 1 TELEMETRY")
+            self.assertEqual(panel._cards_by_id["A"].status.text(), "TELEMETRY ONLINE")
+            self.assertTrue(panel._cards_by_id["A"].uplink.isVisibleTo(panel))
+            self.assertEqual(panel._cards_by_id["B"].status.text(), "NO TELEMETRY")
+            self.assertFalse(panel._cards_by_id["B"].uplink.isVisible())
+        finally:
+            panel.close()
 
     def test_missed_discovery_reply_does_not_drop_recent_robot_or_selection(self):
         self.manager.set_radio_connected(True)

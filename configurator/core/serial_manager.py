@@ -142,7 +142,7 @@ class SerialManager(QObject):
         except Exception as exc: self.error.emit(str(exc))
 
     def send_telemetry_request(self, flags=Protocol.TELEMETRY_FLAGS_FULL):
-        if not self.is_connected: return
+        if not self.is_connected: return False
         self._request_sequence = (self._request_sequence + 1) & 0xFFFF
         sent_ns = time.monotonic_ns()
         self._telemetry_sent_at[self._request_sequence] = {
@@ -151,6 +151,7 @@ class SerialManager(QObject):
         }
         self._write_frame(Protocol.encode_telemetry_request(
             self.state.robot_id, self._request_sequence, flags), "telemetry_request", sent_ns)
+        return True
 
     def set_radio_profile(self, profile):
         profile = get_radio_profile(profile)
@@ -206,8 +207,9 @@ class SerialManager(QObject):
                                   brake=self._brake or motion == (0.0, 0.0, 0.0))
                 self._kick_pending = False
             if due.telemetry:
-                self.send_telemetry_request(self._telemetry_flags_for_next_request(now_ns))
-                if self.profile.telemetry_reply_guard:
+                telemetry_sent = self.send_telemetry_request(
+                    self._telemetry_flags_for_next_request(now_ns))
+                if telemetry_sent and self.profile.telemetry_reply_guard:
                     guard_ns = round(Protocol.TELEMETRY_REPLY_WINDOW_S * 1_000_000_000)
                     self.scheduler.guard_command_until(now_ns + guard_ns)
             if self._last_telemetry and now - self._last_telemetry > 1.0 and not self._lost_emitted:

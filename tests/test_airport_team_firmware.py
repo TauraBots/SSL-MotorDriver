@@ -318,7 +318,13 @@ class AirportTeamProtocolTests(unittest.TestCase):
             "static uint8_t Serial_TxAllowed(const uint8_t *data, uint16_t len)\n{")
         tx_guard_end = service_c.index("static uint8_t Serial_QueueTx", tx_guard_start)
         tx_guard = service_c[tx_guard_start:tx_guard_end]
-        self.assertNotIn("TX_TYPE_CONFIG", tx_guard)
+        for response_type in ("TX_TYPE_CONFIG_DISCOVER_RESPONSE",
+                              "TX_TYPE_CONFIG_SET_ID_RESPONSE",
+                              "TX_TYPE_CONFIG_SET_MOTION_RESPONSE"):
+            self.assertIn(response_type, tx_guard)
+        for request_type in ("RX_TYPE_CONFIG_DISCOVER", "RX_TYPE_CONFIG_SET_ID",
+                             "RX_TYPE_CONFIG_SET_MOTION"):
+            self.assertNotIn(request_type, tx_guard)
         self.assertNotIn("RX_TYPE_ROBOT_VELOCITY", tx_guard)
         self.assertNotIn("RX_TYPE_TEAM_VELOCITY", tx_guard)
 

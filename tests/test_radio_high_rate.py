@@ -120,6 +120,8 @@ class RadioProfileAndSchedulerTests(unittest.TestCase):
     def test_full_replaces_fast_and_is_periodic_per_robot(self):
         clock = SimulatedClock(); radio = RadioManager(); radio._serial = ResponsiveFakeSerial(clock)
         radio.state.robot_id = "A"
+        robot = radio.robots.ensure_robot("A"); robot.discovered = True
+        radio.robots.set_uplink_robot("A", 0)
         with patch("core.serial_manager.time.monotonic_ns", clock.monotonic_ns), \
              patch("core.radio_manager.time.monotonic_ns", clock.monotonic_ns):
             radio.set_radio_profile(VALIDATION_120)
@@ -215,11 +217,12 @@ class RadioFakeSerialIntegrationTests(unittest.TestCase):
             for now_ns in range(0, 400_000_000, 1_000_000):
                 self.clock.now_ns = now_ns; self.radio._tick()
             snapshot = self.radio.link_stats.snapshot(self.clock.now_ns)
-        self.assertGreater(snapshot.telemetry_timed_out_requests, 0)
+        self.assertEqual(snapshot.telemetry_timed_out_requests, 0)
+        self.assertGreater(snapshot.telemetry_probe_timeouts, 0)
         self.assertGreater(snapshot.telemetry_unmatched_responses, 0)
-        self.assertGreater(snapshot.telemetry_response_loss_percent, 0)
+        self.assertEqual(snapshot.telemetry_response_loss_percent, 0)
 
-    def test_polling_target_is_global_with_two_robots(self):
+    def test_polling_locks_to_the_uplink_robot_with_two_registered(self):
         robot_b = self.radio.robots.ensure_robot("B")
         robot_b.discovered = robot_b.connected = True; robot_b.status = "ONLINE"
         with patch("core.serial_manager.time.monotonic_ns", self.clock.monotonic_ns), \
@@ -232,7 +235,8 @@ class RadioFakeSerialIntegrationTests(unittest.TestCase):
                     if frame[2] == Protocol.TELEMETRY_REQUEST_TYPE]
         targets = [chr(frame[4]) for frame in requests]
         self.assertAlmostEqual(len(requests), 120, delta=1)
-        self.assertLessEqual(abs(targets.count("A") - targets.count("B")), 1)
+        self.assertEqual(set(targets), {"A"})
+        self.assertEqual(self.radio.robots.uplink_robot_id, "A")
 
     def test_profile_change_resets_deadlines_and_guard_is_profile_specific(self):
         with patch("core.serial_manager.time.monotonic_ns", self.clock.monotonic_ns), \

@@ -91,7 +91,10 @@ são contabilizados. VALIDATION 120 desloca E0 em meia fase.
 - FULL solicita também `BATTERY | DIAGNOSTICS`.
 - FULL substitui FAST naquele ciclo, mantendo E0 limitado ao target FAST.
 - FULL é acompanhado por ID de robô.
-- O polling E0 permanece round-robin e independente do robô ativo para D0.
+- No AirPort multi-RX, E0 fica direcionado ao `uplink_robot_id` que respondeu
+  E1/E3 mais recentemente. Sem uplink conhecido, o Configurator faz probe lento
+  entre A/B/C ate receber uma resposta valida; o alvo de controle permanece
+  independente do alvo de telemetria.
 
 A taxa FAST é global. Em 120 E0/s, um robô pode receber aproximadamente 120
 pedidos/s, dois recebem cerca de 60/s cada e quatro cerca de 30/s cada.

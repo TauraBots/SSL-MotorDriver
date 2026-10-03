@@ -44,7 +44,8 @@ Perfis de firmware:
 - `quadmd_bench`: build padrao, `TAURA_COMM_MODE=COMM_MODE_BENCH`, USART2 `9600`, AirPort, `D0/E0/E1`.
 - `quadmd_match_airport`: adicionar `TAURA_COMM_MODE=COMM_MODE_MATCH`; o
   transporte default e `MATCH_TRANSPORT_AIRPORT_TEAM`, USART2 `9600`, D1
-  conjunto para A/B/C e uplink E1/E3 somente em resposta a E0/E2.
+  conjunto para A/B/C e uplink solicitado E1/E3/F2/F3/F5. A configuracao
+  F0--F5 e destinada a service com apenas o robo/RX alvo ativo.
 - `quadmd_match_crsf`: adicionar `TAURA_COMM_MODE=COMM_MODE_MATCH` e
   `TAURA_MATCH_TRANSPORT=MATCH_TRANSPORT_CHANNELS`, USART2 `420000`, CRSF.
 

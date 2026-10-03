@@ -78,9 +78,11 @@ class MainWindow(QMainWindow):
             field.addWidget(label); field.addWidget(widget); control_row.addLayout(field)
         self.header_refresh = QPushButton("REFRESH"); self.header_refresh.setFixedWidth(88); control_row.addWidget(self.header_refresh, 0, Qt.AlignmentFlag.AlignBottom)
         self.header_connect = QPushButton("CONNECT"); self.header_connect.setFixedWidth(112); self.header_connect.setProperty("accent", True); control_row.addWidget(self.header_connect, 0, Qt.AlignmentFlag.AlignBottom); row.addWidget(controls)
-        self.radio_status = HeaderStatusItem("Radio status", "OFFLINE"); self.robots_status = HeaderStatusItem("Telemetry online", "0"); self.latency_status = HeaderStatusItem("Link latency", "—"); self.system_status = HeaderStatusItem("System status", "OFFLINE")
+        self.radio_status = HeaderStatusItem("Radio status", "OFFLINE"); self.registered_status = HeaderStatusItem("Registered", "0"); self.robots_status = HeaderStatusItem("Telemetry online", "0"); self.uplink_status = HeaderStatusItem("Uplink", "NONE"); self.latency_status = HeaderStatusItem("Link latency", "—"); self.system_status = HeaderStatusItem("System status", "OFFLINE")
         status_row = QHBoxLayout(); status_row.setSpacing(8)
-        for widget in (self.radio_status, self.robots_status, self.latency_status, self.system_status): status_row.addWidget(widget, 1)
+        for widget in (self.radio_status, self.registered_status, self.robots_status,
+                       self.uplink_status, self.latency_status, self.system_status):
+            status_row.addWidget(widget, 1)
         header_layout.addLayout(status_row)
         outer.addWidget(header)
         body = QHBoxLayout(); body.setContentsMargins(0, 0, 0, 0); body.setSpacing(0)
@@ -173,13 +175,16 @@ class MainWindow(QMainWindow):
 
     def update_system_header(self, state):
         self.radio_status.set_status("CONNECTED" if state.radio_connected else "OFFLINE", "ok" if state.radio_connected else "error")
+        self.registered_status.set_status(str(state.registered_robot_count), "ok" if state.registered_robot_count else "off")
         self.robots_status.set_status(str(state.online_robot_count), "ok" if state.online_robot_count else "off")
+        self.uplink_status.set_status(state.uplink_robot_id or "NONE", "ok" if state.uplink_robot_id else "off")
         self.latency_status.set_status(f"{state.latency_ms} ms" if state.latency_ms is not None else "NO DATA", "ok" if state.latency_ms is not None and state.latency_ms < 100 else "warning")
         system_state = "ok" if state.system_status == "READY" else "warning" if state.system_status == "WARNING" else "error"
         self.system_status.set_status(state.system_status, system_state)
 
     def update_fleet(self, robots):
-        self.fleet.set_fleet(robots, self.manager.robots.system_state.active_robot_id)
+        self.fleet.set_fleet(robots, self.manager.robots.system_state.active_robot_id,
+                             self.manager.robots.uplink_robot_id)
         active = self.manager.robots.active_robot
         self.dashboard.set_robot(active)
         available = active is not None and active.can_control and self.manager.is_connected
@@ -188,7 +193,9 @@ class MainWindow(QMainWindow):
             self.telemetry.communication_card.update_status("NO DATA", "TELEMETRY LOST", "warning")
 
     def discovery_finished(self, robots):
-        self.fleet.set_discovering(False); self.toast(f"Discovery complete: {sum(robot.connected for robot in robots)} robot(s) with telemetry", "info")
+        telemetry = sum(robot.connected for robot in robots)
+        self.fleet.set_discovering(False)
+        self.toast(f"Discovery complete: {telemetry} telemetry / {len(robots)} registered", "info")
 
     def active_robot_changed(self, robot):
         available = robot is not None and robot.can_control and self.manager.is_connected

@@ -3,6 +3,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,37 +37,60 @@ def telemetry_frame(robot_id, sequence, battery_mv, rpm):
 class MultiRobotTelemetryTests(unittest.TestCase):
     def setUp(self):
         self.radio = RadioManager(); self.radio._serial = FakeSerial(); self.radio.state.robot_id = "A"
-        for robot_id in "ABC":
+        for robot_id in "AB":
             robot = self.radio.robots.ensure_robot(robot_id); robot.discovered = True
-            robot.connected = True; robot.status = "ONLINE"; robot.last_seen = time.monotonic()
+            robot.connected = False; robot.status = "PENDING"
 
-    def test_polling_round_robin_is_independent_from_control_target(self):
-        targets = []
-        for _ in range(3):
-            self.radio.send_telemetry_request(); targets.append(chr(self.radio._serial.frames[-1][4]))
-        self.assertEqual(targets, ["A", "B", "C"])
+    def _send_reply(self, robot_id, battery_mv=11800, rpm=(10, 20, 30, 40), now_ns=10_000_000):
+        request = self.radio._serial.frames[-1]
+        sequence = struct.unpack_from("<H", request, 5)[0]
+        self.radio._rx.extend(telemetry_frame(robot_id, sequence, battery_mv, rpm))
+        self.radio._consume_rx(now_ns)
+
+    def test_valid_response_locks_polling_to_uplink_not_control_target(self):
+        with patch("core.radio_manager.time.monotonic_ns", return_value=0):
+            self.assertTrue(self.radio.send_telemetry_request())
+        self.assertEqual(chr(self.radio._serial.frames[-1][4]), "A")
+        self._send_reply("A")
+        self.assertEqual(self.radio.uplink_robot_id, "A")
+
         self.radio.select_robot("B")
-        self.radio.send_telemetry_request()
+        self.assertTrue(self.radio.send_telemetry_request())
         self.assertEqual(chr(self.radio._serial.frames[-1][4]), "A")
         self.assertEqual(self.radio.robots.system_state.active_robot_id, "B")
 
-    def test_all_robot_states_update_while_b_is_control_target(self):
-        self.radio.select_robot("B")
-        expected = {"A": (11800, (10, 20, 30, 40)),
-                    "B": (11600, (50, 60, 70, 80)),
-                    "C": (11400, (90, 100, 110, 120))}
-        for robot_id in "ABC":
+    def test_uplink_loss_probes_next_robot_without_removing_registration(self):
+        with patch("core.radio_manager.time.monotonic_ns", return_value=0):
             self.radio.send_telemetry_request()
-            sequence = struct.unpack_from("<H", self.radio._serial.frames[-1], 5)[0]
-            battery, rpm = expected[robot_id]
-            self.radio._rx.extend(telemetry_frame(robot_id, sequence, battery, rpm))
-            self.radio._consume_rx(time.monotonic())
-        for robot_id, (battery, rpm) in expected.items():
-            state = self.radio.robots.ensure_robot(robot_id)
-            self.assertAlmostEqual(state.battery, battery / 1000.0)
-            self.assertEqual(state.rpm, rpm)
-        self.assertEqual(self.radio.robots.system_state.active_robot_id, "B")
-        self.assertEqual(self.radio.state.robot_id, "B")
+        self._send_reply("A")
+        state = self.radio.robots.system_state
+        self.assertEqual((state.registered_robot_count, state.online_robot_count), (2, 1))
+
+        robot_a = self.radio.robots.ensure_robot("A")
+        robot_a.last_seen = 0.0
+        with patch("core.robot_manager.time.monotonic", return_value=2.0):
+            self.radio._expire_stale_robots()
+        self.assertIsNone(self.radio.robots.uplink_robot_id)
+        self.assertIsNone(self.radio.robots.system_state.latency_ms)
+        self.assertEqual(robot_a.status, "NO TELEMETRY")
+        self.assertTrue(robot_a.discovered)
+
+        with patch("core.radio_manager.time.monotonic_ns", return_value=2_000_000_000):
+            self.assertTrue(self.radio.send_telemetry_request())
+        self.assertEqual(chr(self.radio._serial.frames[-1][4]), "B")
+        self._send_reply("B", now_ns=2_010_000_000)
+        self.assertEqual(self.radio.uplink_robot_id, "B")
+        self.assertTrue(robot_a.discovered)
+
+    def test_registered_robot_without_telemetry_remains_controllable(self):
+        self.radio.state.connected = True
+        self.radio.select_robot("B")
+        self.assertFalse(self.radio.robots.active_robot.connected)
+        self.assertTrue(self.radio.robots.active_robot.can_control)
+        self.radio.send_command(0.3, 0.0, 0.0)
+        frame = self.radio._serial.frames[-1]
+        self.assertEqual(frame[2], Protocol.ROBOT_VELOCITY_TYPE)
+        self.assertEqual(chr(frame[4]), "B")
 
     def test_manual_expected_robots_are_polled_without_discovery(self):
         radio = RadioManager(); radio._serial = FakeSerial(); radio.state.robot_id = "A"
@@ -74,7 +98,8 @@ class MultiRobotTelemetryTests(unittest.TestCase):
         self.assertEqual([robot.robot_id for robot in radio.robots.discovered_robots], ["A", "B"])
         self.assertEqual([robot.connected for robot in radio.robots.discovered_robots], [False, False])
         self.assertEqual([robot.can_control for robot in radio.robots.discovered_robots], [True, True])
-        radio.send_telemetry_request(); radio.send_telemetry_request()
+        with patch("core.radio_manager.time.monotonic_ns", side_effect=(0, 500_000_000)):
+            radio.send_telemetry_request(); radio.send_telemetry_request()
         targets = [chr(frame[4]) for frame in radio._serial.frames]
         self.assertEqual(targets, ["A", "B"])
 

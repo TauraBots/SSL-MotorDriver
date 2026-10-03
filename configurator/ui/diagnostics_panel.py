@@ -49,6 +49,7 @@ class DiagnosticsPanel(QWidget):
             f"Command — Target: {profile.command_hz:g} Hz · Measured: {stats.command_tx_hz:.1f} Hz\n"
             f"Telemetry — Target: {profile.telemetry_fast_hz:g} Hz · Requests: {stats.telemetry_request_tx_hz:.1f} Hz · Responses: {stats.telemetry_response_rx_hz:.1f} Hz\n"
             f"Response loss: {stats.telemetry_response_loss_percent:.1f}%\n"
+            f"Timeouts — uplink {stats.telemetry_timed_out_requests} · probe {stats.telemetry_probe_timeouts}\n"
             f"Latency — last {value(stats.latency_last_ms)} ms · mean {value(stats.latency_mean_ms)} ms · max {value(stats.latency_max_ms)} ms · p95 {value(stats.latency_p95_ms)} ms\n"
             f"Missed deadlines — CMD {stats.command_deadlines_missed} · TEL {stats.telemetry_deadlines_missed}\n"
             f"Measured throughput — TX {stats.tx_bytes_per_s / 1000:.2f} kB/s · RX {stats.rx_bytes_per_s / 1000:.2f} kB/s"
