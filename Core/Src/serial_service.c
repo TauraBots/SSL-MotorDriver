@@ -1,6 +1,8 @@
 #include "serial_service.h"
 
 #include "app_c_api.h"
+#include "crsf_protocol.h"
+#include "match_control.h"
 #include "robot_identity.h"
 #include "serial_profile.h"
 #include "serial_protocol.h"
@@ -13,11 +15,12 @@
 #define TELEMETRY_SOF 0xAA55U
 #define COMMAND_PACKET_LEN SERIAL_COMMAND_PACKET_LEN
 #define ROBOT_VELOCITY_PACKET_LEN SERIAL_ROBOT_VELOCITY_PACKET_LEN
+#define TEAM_VELOCITY_PACKET_LEN SERIAL_TEAM_VELOCITY_PACKET_LEN
 #define CONFIG_DISCOVER_PACKET_LEN SERIAL_CONFIG_DISCOVER_PACKET_LEN
 #define CONFIG_SET_ID_PACKET_LEN SERIAL_CONFIG_SET_ID_PACKET_LEN
 #define CONFIG_RESPONSE_PACKET_LEN SERIAL_CONFIG_RESPONSE_PACKET_LEN
 #define CONFIG_SET_MOTION_PACKET_LEN SERIAL_CONFIG_SET_MOTION_PACKET_LEN
-#define RX_FRAME_LEN_MAX SERIAL_CONFIG_SET_MOTION_PACKET_LEN
+#define RX_FRAME_LEN_MAX SERIAL_TEAM_VELOCITY_PACKET_LEN
 #define TELEMETRY_REQUEST_PACKET_LEN SERIAL_TELEMETRY_REQUEST_PACKET_LEN
 #define TELEMETRY_RESPONSE_PACKET_LEN_MAX SERIAL_TELEMETRY_RESPONSE_PACKET_LEN_MAX
 #define DISCOVERY_REQUEST_PACKET_LEN SERIAL_DISCOVERY_REQUEST_PACKET_LEN
@@ -32,6 +35,7 @@
 #define TX_TYPE_CONFIG_SET_MOTION_RESPONSE SERIAL_TYPE_CONFIG_SET_MOTION_RESPONSE
 #define RX_TYPE_TELEMETRY_REQUEST SERIAL_TYPE_TELEMETRY_REQUEST
 #define RX_TYPE_ROBOT_VELOCITY SERIAL_TYPE_ROBOT_VELOCITY
+#define RX_TYPE_TEAM_VELOCITY SERIAL_TYPE_TEAM_VELOCITY
 #define ROBOT_VELOCITY_PROTOCOL_VERSION SERIAL_ROBOT_VELOCITY_PROTOCOL_VERSION
 #define TX_TYPE_TELEMETRY_RESPONSE SERIAL_TYPE_TELEMETRY_RESPONSE
 #define RX_TYPE_DISCOVERY_REQUEST SERIAL_TYPE_DISCOVERY_REQUEST
@@ -48,6 +52,8 @@
 #define ROBOT_ID_BROADCAST SERIAL_ROBOT_ID_BROADCAST
 #define ROBOT_CONFIG_KEY 0x46434449U
 #define ROBOT_UID_LEN ROBOT_IDENTITY_UID_LEN
+#define MATCH_DISCOVERY_SLOT_BASE_MS 20U
+#define MATCH_DISCOVERY_SLOT_SPACING_MS 70U
 
 #define Crc16CcittFalse SerialProtocol_Crc16
 #define U16LE SerialProtocol_ReadU16LE
@@ -104,9 +110,30 @@ volatile float dbg_wheel_m4_rpm = 0.0f;
 
 static UART_HandleTypeDef *serial_uart = NULL;
 static DMA_HandleTypeDef *serial_rx_dma = NULL;
+static CommMode serial_comm_mode = (CommMode)TAURA_COMM_MODE;
+static CrsfParser crsf_parser;
+static uint8_t team_rx_frame[TEAM_VELOCITY_PACKET_LEN];
+static uint8_t team_rx_len = 0U;
+static uint8_t team_rx_expected_len = 0U;
+
+volatile uint32_t match_telemetry_requests = 0U;
+volatile uint32_t match_telemetry_responses = 0U;
+volatile uint32_t match_discovery_requests = 0U;
+volatile uint32_t match_discovery_responses = 0U;
+volatile uint32_t match_uplink_dropped_busy = 0U;
+volatile uint32_t match_config_discover_requests = 0U;
+volatile uint32_t match_config_discover_responses = 0U;
+volatile uint32_t match_config_set_id_requests = 0U;
+volatile uint32_t match_config_set_id_responses = 0U;
+volatile uint32_t match_config_motion_requests = 0U;
+volatile uint32_t match_config_motion_responses = 0U;
 
 static void Serial_ProcessRx(void);
 static void Serial_ProcessByte(uint8_t b);
+static void Serial_ProcessBenchByte(uint8_t b);
+static void Serial_ProcessMatchByte(uint8_t b);
+static void Serial_ProcessAirportTeamByte(uint8_t b);
+static void Serial_ResetAirportTeamParser(void);
 static void Serial_ProcessCommandPacket(const uint8_t *buf);
 static void Serial_TelemetryTask(void);
 static void Serial_DiscoveryTask(void);
@@ -119,6 +146,14 @@ static void Serial_ProcessSetIdPacket(const uint8_t *buf);
 static void Serial_ProcessSetMotionPacket(const uint8_t *buf);
 static void Serial_ProcessTelemetryRequest(const uint8_t *buf);
 static void Serial_ProcessDiscoveryRequest(const uint8_t *buf);
+static uint8_t Serial_IsMatchAirport(void);
+static uint8_t Serial_TxAllowed(const uint8_t *data, uint16_t len);
+
+static uint8_t Serial_IsMatchAirport(void)
+{
+  return ((serial_comm_mode == COMM_MODE_MATCH) &&
+          (TAURA_MATCH_TRANSPORT == MATCH_TRANSPORT_AIRPORT_TEAM)) ? 1U : 0U;
+}
 
 static void Serial_ProcessCommandPacket(const uint8_t *buf)
 {
@@ -194,6 +229,12 @@ static void Serial_ProcessRobotVelocityPacket(const uint8_t *buf)
 
 static uint8_t Serial_SendConfigResponse(uint8_t type, uint8_t status)
 {
+  if ((serial_comm_mode != COMM_MODE_BENCH) &&
+      (Serial_IsMatchAirport() == 0U))
+  {
+    return 0U;
+  }
+
   uint8_t response[CONFIG_RESPONSE_PACKET_LEN] = {0};
   uint8_t uid[ROBOT_UID_LEN];
   RobotUidRead(uid);
@@ -207,12 +248,7 @@ static uint8_t Serial_SendConfigResponse(uint8_t type, uint8_t status)
   const uint16_t crc = Crc16CcittFalse(response, CONFIG_RESPONSE_PACKET_LEN - 2U);
   response[21] = (uint8_t)crc;
   response[22] = (uint8_t)(crc >> 8);
-  if ((uart_tx_busy != 0U) || (uart_tx_q_count != 0U))
-  {
-    return 0U;
-  }
-
-  return (HAL_UART_Transmit(serial_uart, response, sizeof(response), 40U) == HAL_OK) ? 1U : 0U;
+  return Serial_QueueTx(response, sizeof(response), 0U);
 }
 
 static void Serial_ProcessDiscoverPacket(const uint8_t *buf)
@@ -222,6 +258,10 @@ static void Serial_ProcessDiscoverPacket(const uint8_t *buf)
   if (crc_rx != crc_ok)
   {
     return;
+  }
+  if (Serial_IsMatchAirport() != 0U)
+  {
+    match_config_discover_requests++;
   }
 
   uint8_t uid[ROBOT_UID_LEN];
@@ -247,7 +287,15 @@ static void Serial_ProcessSetIdPacket(const uint8_t *buf)
   const uint16_t crc_ok = Crc16CcittFalse(buf, CONFIG_SET_ID_PACKET_LEN - 2U);
   uint8_t uid[ROBOT_UID_LEN];
   RobotUidRead(uid);
-  if ((crc_rx != crc_ok) || (memcmp(&buf[3], uid, ROBOT_UID_LEN) != 0) ||
+  if (crc_rx != crc_ok)
+  {
+    return;
+  }
+  if (Serial_IsMatchAirport() != 0U)
+  {
+    match_config_set_id_requests++;
+  }
+  if ((memcmp(&buf[3], uid, ROBOT_UID_LEN) != 0) ||
       (U32LE(&buf[16]) != ROBOT_CONFIG_KEY))
   {
     return;
@@ -268,7 +316,15 @@ static void Serial_ProcessSetMotionPacket(const uint8_t *buf)
   const uint16_t crc_ok = Crc16CcittFalse(buf, CONFIG_SET_MOTION_PACKET_LEN - 2U);
   uint8_t uid[ROBOT_UID_LEN];
   RobotUidRead(uid);
-  if ((crc_rx != crc_ok) || (memcmp(&buf[3], uid, ROBOT_UID_LEN) != 0) ||
+  if (crc_rx != crc_ok)
+  {
+    return;
+  }
+  if (Serial_IsMatchAirport() != 0U)
+  {
+    match_config_motion_requests++;
+  }
+  if ((memcmp(&buf[3], uid, ROBOT_UID_LEN) != 0) ||
       (U32LE(&buf[23]) != ROBOT_CONFIG_KEY))
   {
     return;
@@ -308,6 +364,26 @@ static void Serial_ConfigResponseTask(void)
   if (Serial_SendConfigResponse(type, status) != 0U)
   {
     config_response_pending = 0U;
+    if (Serial_IsMatchAirport() != 0U)
+    {
+      if (type == TX_TYPE_CONFIG_DISCOVER_RESPONSE)
+      {
+        match_config_discover_responses++;
+      }
+      else if (type == TX_TYPE_CONFIG_SET_ID_RESPONSE)
+      {
+        match_config_set_id_responses++;
+      }
+      else if (type == TX_TYPE_CONFIG_SET_MOTION_RESPONSE)
+      {
+        match_config_motion_responses++;
+      }
+    }
+  }
+  else if (Serial_IsMatchAirport() != 0U)
+  {
+    config_response_pending = 0U;
+    match_uplink_dropped_busy++;
   }
 }
 
@@ -321,13 +397,29 @@ static void Serial_ProcessTelemetryRequest(const uint8_t *buf)
     serial_dbg_rx_bad_crc++;
     return;
   }
-  if ((buf[3] != TELEMETRY_PROTOCOL_VERSION) ||
+  if (buf[3] != TELEMETRY_PROTOCOL_VERSION)
+  {
+    return;
+  }
+  if (Serial_IsMatchAirport() != 0U)
+  {
+    match_telemetry_requests++;
+  }
+  if ((buf[4] == ROBOT_ID_BROADCAST) ||
       (live_robot_configured == 0U) ||
       (RobotIdIsValid(buf[4]) == 0U) ||
-      (buf[4] != live_robot_id) ||
-      (telemetry_response_pending != 0U) ||
-      ((telemetry_has_sent != 0U) && ((now - last_telemetry_tick) < TELEMETRY_MIN_INTERVAL_MS)))
+      (buf[4] != live_robot_id))
   {
+    return;
+  }
+  if ((telemetry_response_pending != 0U) ||
+      ((telemetry_has_sent != 0U) &&
+       ((now - last_telemetry_tick) < TELEMETRY_MIN_INTERVAL_MS)))
+  {
+    if (Serial_IsMatchAirport() != 0U)
+    {
+      match_uplink_dropped_busy++;
+    }
     return;
   }
 
@@ -342,21 +434,53 @@ static void Serial_ProcessDiscoveryRequest(const uint8_t *buf)
 {
   const uint16_t crc_rx = U16LE(&buf[DISCOVERY_REQUEST_PACKET_LEN - 2U]);
   const uint16_t crc_ok = Crc16CcittFalse(buf, DISCOVERY_REQUEST_PACKET_LEN - 2U);
-  if ((crc_rx != crc_ok) || (buf[3] != DISCOVERY_PROTOCOL_VERSION) ||
-      (live_robot_configured == 0U))
+  if ((crc_rx != crc_ok) || (buf[3] != DISCOVERY_PROTOCOL_VERSION))
   {
+    return;
+  }
+
+  const uint8_t match_airport = Serial_IsMatchAirport();
+  if (match_airport != 0U)
+  {
+    match_discovery_requests++;
+  }
+  else if (live_robot_configured == 0U)
+  {
+    return;
+  }
+  if (discovery_response_pending != 0U)
+  {
+    if (match_airport != 0U)
+    {
+      match_uplink_dropped_busy++;
+    }
     return;
   }
 
   uint8_t uid[ROBOT_UID_LEN];
   RobotUidRead(uid);
   discovery_request_sequence = U16LE(&buf[4]);
-  uint32_t slot_hash = (uint32_t)discovery_request_sequence ^ 0x7F4A7C15U;
-  for (uint8_t i = 0U; i < ROBOT_UID_LEN; i++)
+  uint32_t response_delay_ms = 0U;
+  if ((match_airport != 0U) && (live_robot_configured != 0U) &&
+      (live_robot_id >= (uint8_t)'A') && (live_robot_id <= (uint8_t)'C'))
   {
-    slot_hash = (slot_hash ^ uid[i]) * 0x85EBCA6BU;
+    response_delay_ms = MATCH_DISCOVERY_SLOT_BASE_MS +
+        ((uint32_t)(live_robot_id - (uint8_t)'A') * MATCH_DISCOVERY_SLOT_SPACING_MS);
   }
-  discovery_response_due_tick = HAL_GetTick() + ((slot_hash & 0x0FU) * 20U);
+  else
+  {
+    uint32_t slot_hash = (uint32_t)discovery_request_sequence ^ 0x7F4A7C15U;
+    for (uint8_t i = 0U; i < ROBOT_UID_LEN; i++)
+    {
+      slot_hash = (slot_hash ^ uid[i]) * 0x85EBCA6BU;
+    }
+    const uint32_t spacing_ms = (match_airport != 0U) ?
+        MATCH_DISCOVERY_SLOT_SPACING_MS : 20U;
+    const uint32_t base_ms = (match_airport != 0U) ?
+        MATCH_DISCOVERY_SLOT_BASE_MS : 0U;
+    response_delay_ms = base_ms + ((slot_hash & 0x0FU) * spacing_ms);
+  }
+  discovery_response_due_tick = HAL_GetTick() + response_delay_ms;
   discovery_response_pending = 1U;
 }
 
@@ -392,6 +516,181 @@ static void Serial_ProcessRx(void)
 }
 
 static void Serial_ProcessByte(uint8_t b)
+{
+  if (serial_comm_mode == COMM_MODE_MATCH)
+  {
+    Serial_ProcessMatchByte(b);
+  }
+  else
+  {
+    Serial_ProcessBenchByte(b);
+  }
+}
+
+static void Serial_ProcessMatchByte(uint8_t b)
+{
+  if (TAURA_MATCH_TRANSPORT == MATCH_TRANSPORT_AIRPORT_TEAM)
+  {
+    Serial_ProcessAirportTeamByte(b);
+    return;
+  }
+
+  serial_dbg_rx_bytes++;
+  CrsfChannels channels;
+  const CrsfParseResult result =
+      CrsfParser_ProcessByte(&crsf_parser, b, &channels);
+  if (result == CRSF_PARSE_RC_CHANNELS)
+  {
+    serial_dbg_rx_frames++;
+    MatchControl_HandleChannels(&channels);
+  }
+  else if (result == CRSF_PARSE_BAD_CRC)
+  {
+    serial_dbg_rx_bad_crc++;
+  }
+}
+
+static void Serial_ResetAirportTeamParser(void)
+{
+  team_rx_len = 0U;
+  team_rx_expected_len = 0U;
+}
+
+static void Serial_ProcessAirportTeamByte(uint8_t b)
+{
+  serial_dbg_rx_bytes++;
+  if (team_rx_len == 0U)
+  {
+    if (b == RX_SOF0)
+    {
+      team_rx_frame[0] = b;
+      team_rx_len = 1U;
+    }
+    return;
+  }
+
+  if (team_rx_len == 1U)
+  {
+    if (b == RX_SOF1)
+    {
+      team_rx_frame[1] = b;
+      team_rx_len = 2U;
+    }
+    else if (b != RX_SOF0)
+    {
+      Serial_ResetAirportTeamParser();
+    }
+    return;
+  }
+
+  if (team_rx_len == 2U)
+  {
+    team_rx_frame[2] = b;
+    team_rx_len = 3U;
+    if (b == RX_TYPE_TEAM_VELOCITY)
+    {
+      team_rx_expected_len = TEAM_VELOCITY_PACKET_LEN;
+    }
+    else if (b == RX_TYPE_TELEMETRY_REQUEST)
+    {
+      team_rx_expected_len = TELEMETRY_REQUEST_PACKET_LEN;
+    }
+    else if (b == RX_TYPE_DISCOVERY_REQUEST)
+    {
+      team_rx_expected_len = DISCOVERY_REQUEST_PACKET_LEN;
+    }
+    else if (b == RX_TYPE_CONFIG_DISCOVER)
+    {
+      team_rx_expected_len = CONFIG_DISCOVER_PACKET_LEN;
+    }
+    else if (b == RX_TYPE_CONFIG_SET_ID)
+    {
+      team_rx_expected_len = CONFIG_SET_ID_PACKET_LEN;
+    }
+    else if (b == RX_TYPE_CONFIG_SET_MOTION)
+    {
+      team_rx_expected_len = CONFIG_SET_MOTION_PACKET_LEN;
+    }
+    else
+    {
+      Serial_ResetAirportTeamParser();
+      if (b == RX_SOF0)
+      {
+        team_rx_frame[0] = b;
+        team_rx_len = 1U;
+      }
+    }
+    return;
+  }
+
+  team_rx_frame[team_rx_len++] = b;
+  if (team_rx_len == team_rx_expected_len)
+  {
+    if (team_rx_frame[2] == RX_TYPE_TELEMETRY_REQUEST)
+    {
+      Serial_ProcessTelemetryRequest(team_rx_frame);
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+    if (team_rx_frame[2] == RX_TYPE_DISCOVERY_REQUEST)
+    {
+      Serial_ProcessDiscoveryRequest(team_rx_frame);
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+    if (team_rx_frame[2] == RX_TYPE_CONFIG_DISCOVER)
+    {
+      Serial_ProcessDiscoverPacket(team_rx_frame);
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+    if (team_rx_frame[2] == RX_TYPE_CONFIG_SET_ID)
+    {
+      Serial_ProcessSetIdPacket(team_rx_frame);
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+    if (team_rx_frame[2] == RX_TYPE_CONFIG_SET_MOTION)
+    {
+      Serial_ProcessSetMotionPacket(team_rx_frame);
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+
+    SerialTeamVelocityFrame decoded;
+    const SerialTeamDecodeResult decode_result =
+        SerialProtocol_DecodeTeamVelocity(team_rx_frame, team_rx_len, &decoded);
+    MatchControl_HandleTeamFrame(team_rx_frame, team_rx_len);
+    if (decode_result == SERIAL_TEAM_DECODE_OK)
+    {
+      Serial_ResetAirportTeamParser();
+      return;
+    }
+
+    uint8_t next_start = TEAM_VELOCITY_PACKET_LEN;
+    for (uint8_t i = 1U; i < (TEAM_VELOCITY_PACKET_LEN - 2U); i++)
+    {
+      if ((team_rx_frame[i] == RX_SOF0) &&
+          (team_rx_frame[i + 1U] == RX_SOF1) &&
+          (team_rx_frame[i + 2U] == RX_TYPE_TEAM_VELOCITY))
+      {
+        next_start = i;
+        break;
+      }
+    }
+    if (next_start < TEAM_VELOCITY_PACKET_LEN)
+    {
+      team_rx_len = TEAM_VELOCITY_PACKET_LEN - next_start;
+      memmove(team_rx_frame, &team_rx_frame[next_start], team_rx_len);
+    }
+    else
+    {
+      Serial_ResetAirportTeamParser();
+    }
+  }
+}
+
+static void Serial_ProcessBenchByte(uint8_t b)
 {
   serial_dbg_rx_bytes++;
   static uint8_t frame[RX_FRAME_LEN_MAX];
@@ -504,9 +803,38 @@ static void Serial_ProcessByte(uint8_t b)
   }
 }
 
+static uint8_t Serial_TxAllowed(const uint8_t *data, uint16_t len)
+{
+  if (serial_comm_mode == COMM_MODE_BENCH)
+  {
+    return 1U;
+  }
+  if ((Serial_IsMatchAirport() == 0U) || (data == NULL) || (len < 3U) ||
+      (data[0] != RX_SOF0) || (data[1] != RX_SOF1))
+  {
+    return 0U;
+  }
+  if (data[2] == TX_TYPE_TELEMETRY_RESPONSE)
+  {
+    return ((len >= 11U) && (len <= TELEMETRY_RESPONSE_PACKET_LEN_MAX)) ? 1U : 0U;
+  }
+  if (data[2] == TX_TYPE_DISCOVERY_RESPONSE)
+  {
+    return (len == DISCOVERY_RESPONSE_PACKET_LEN) ? 1U : 0U;
+  }
+  if ((data[2] == TX_TYPE_CONFIG_DISCOVER_RESPONSE) ||
+      (data[2] == TX_TYPE_CONFIG_SET_ID_RESPONSE) ||
+      (data[2] == TX_TYPE_CONFIG_SET_MOTION_RESPONSE))
+  {
+    return (len == CONFIG_RESPONSE_PACKET_LEN) ? 1U : 0U;
+  }
+  return 0U;
+}
+
 static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_prio)
 {
-  if ((data == NULL) || (len == 0U) || (len >= UART_TX_BUF_SIZE))
+  if ((data == NULL) || (len == 0U) || (len >= UART_TX_BUF_SIZE) ||
+      (Serial_TxAllowed(data, len) == 0U))
   {
     return 0U;
   }
@@ -544,7 +872,9 @@ static uint8_t Serial_QueueTx(const uint8_t *data, uint16_t len, uint8_t high_pr
 
 static void Serial_TxKick(void)
 {
-  if ((uart_tx_busy != 0U) || (uart_tx_q_count == 0U))
+  if (((serial_comm_mode != COMM_MODE_BENCH) &&
+       (Serial_IsMatchAirport() == 0U)) ||
+      (uart_tx_busy != 0U) || (uart_tx_q_count == 0U))
   {
     return;
   }
@@ -602,6 +932,12 @@ static void Serial_UartRecoveryTask(void)
   (void)HAL_UART_Abort(serial_uart);
   __HAL_UART_CLEAR_OREFLAG(serial_uart);
   uart_rx_last_pos = 0U;
+  if (serial_comm_mode == COMM_MODE_MATCH)
+  {
+    CrsfParser_Init(&crsf_parser);
+    Serial_ResetAirportTeamParser();
+    MatchControl_Init();
+  }
   if (HAL_UART_Receive_DMA(serial_uart, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE) == HAL_OK)
   {
     __HAL_DMA_DISABLE_IT(serial_rx_dma, DMA_IT_HT);
@@ -682,6 +1018,15 @@ static void Serial_TelemetryTask(void)
     last_telemetry_tick = now;
     telemetry_has_sent = 1U;
     telemetry_response_pending = 0U;
+    if (Serial_IsMatchAirport() != 0U)
+    {
+      match_telemetry_responses++;
+    }
+  }
+  else if (Serial_IsMatchAirport() != 0U)
+  {
+    telemetry_response_pending = 0U;
+    match_uplink_dropped_busy++;
   }
 }
 
@@ -708,12 +1053,22 @@ static void Serial_DiscoveryTask(void)
   frame[19] = SERIAL_FIRMWARE_VERSION_MAJOR;
   frame[20] = SERIAL_FIRMWARE_VERSION_MINOR;
   frame[21] = SERIAL_FIRMWARE_VERSION_PATCH;
-  frame[22] = (uint8_t)(1U | (uint8_t)(telem.fault_status << 1));
+  frame[22] = (uint8_t)((live_robot_configured != 0U ? 1U : 0U) |
+                        (uint8_t)(telem.fault_status << 1));
   WriteU16LE(&frame[23], (uint16_t)(telem.battery_voltage_v * 1000.0f));
   WriteU16LE(&frame[25], Crc16CcittFalse(frame, 25U));
   if (Serial_QueueTx(frame, sizeof(frame), 0U) != 0U)
   {
     discovery_response_pending = 0U;
+    if (Serial_IsMatchAirport() != 0U)
+    {
+      match_discovery_responses++;
+    }
+  }
+  else if (Serial_IsMatchAirport() != 0U)
+  {
+    discovery_response_pending = 0U;
+    match_uplink_dropped_busy++;
   }
 }
 
@@ -722,6 +1077,9 @@ HAL_StatusTypeDef SerialService_Init(UART_HandleTypeDef *uart,
 {
   serial_uart = uart;
   serial_rx_dma = rx_dma;
+  CrsfParser_Init(&crsf_parser);
+  Serial_ResetAirportTeamParser();
+  MatchControl_Init();
   const HAL_StatusTypeDef status =
       HAL_UART_Receive_DMA(serial_uart, uart_rx_dma_buf, UART_RX_DMA_BUF_SIZE);
   if (status != HAL_OK)
@@ -729,8 +1087,11 @@ HAL_StatusTypeDef SerialService_Init(UART_HandleTypeDef *uart,
     return status;
   }
   __HAL_DMA_DISABLE_IT(serial_rx_dma, DMA_IT_HT);
-  (void)HAL_UART_Transmit(serial_uart, (uint8_t *)"USART2 READY\r\n",
-                          strlen("USART2 READY\r\n"), 20U);
+  if (serial_comm_mode == COMM_MODE_BENCH)
+  {
+    (void)HAL_UART_Transmit(serial_uart, (uint8_t *)"USART2 READY\r\n",
+                            strlen("USART2 READY\r\n"), 20U);
+  }
   return HAL_OK;
 }
 
@@ -738,9 +1099,22 @@ void SerialService_Task(void)
 {
   Serial_UartRecoveryTask();
   Serial_ProcessRx();
-  Serial_ConfigResponseTask();
-  Serial_DiscoveryTask();
-  Serial_TelemetryTask();
+  if (serial_comm_mode == COMM_MODE_MATCH)
+  {
+    MatchControl_Task();
+    if (Serial_IsMatchAirport() != 0U)
+    {
+      Serial_ConfigResponseTask();
+      Serial_DiscoveryTask();
+      Serial_TelemetryTask();
+    }
+  }
+  else
+  {
+    Serial_ConfigResponseTask();
+    Serial_DiscoveryTask();
+    Serial_TelemetryTask();
+  }
 }
 
 void SerialService_OnTxComplete(UART_HandleTypeDef *uart)
@@ -760,4 +1134,20 @@ void SerialService_OnError(UART_HandleTypeDef *uart)
     uart_tx_busy = 0U;
     uart_recovery_pending = 1U;
   }
+}
+
+void SerialService_SetCommMode(CommMode mode)
+{
+  serial_comm_mode = mode;
+  CrsfParser_Init(&crsf_parser);
+  Serial_ResetAirportTeamParser();
+  MatchControl_Init();
+  telemetry_response_pending = 0U;
+  discovery_response_pending = 0U;
+  config_response_pending = 0U;
+}
+
+CommMode SerialService_GetCommMode(void)
+{
+  return serial_comm_mode;
 }

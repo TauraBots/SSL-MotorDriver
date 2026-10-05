@@ -66,3 +66,43 @@ int16_t SerialProtocol_SaturateI16(float value)
   }
   return (int16_t)value;
 }
+
+SerialTeamDecodeResult SerialProtocol_DecodeTeamVelocity(
+    const uint8_t *data, uint16_t len, SerialTeamVelocityFrame *frame)
+{
+  if ((data == 0) || (frame == 0) ||
+      (len != SERIAL_TEAM_VELOCITY_PACKET_LEN))
+  {
+    return SERIAL_TEAM_DECODE_BAD_LENGTH;
+  }
+
+  if ((data[0] != SERIAL_RX_SOF0) || (data[1] != SERIAL_RX_SOF1) ||
+      (data[2] != SERIAL_TYPE_TEAM_VELOCITY))
+  {
+    return SERIAL_TEAM_DECODE_BAD_FORMAT;
+  }
+
+  const uint16_t crc_offset = SERIAL_TEAM_VELOCITY_PACKET_LEN - 2U;
+  if (SerialProtocol_ReadU16LE(&data[crc_offset]) !=
+      SerialProtocol_Crc16(data, crc_offset))
+  {
+    return SERIAL_TEAM_DECODE_BAD_CRC;
+  }
+
+  if (data[3] != SERIAL_TEAM_VELOCITY_PROTOCOL_VERSION)
+  {
+    return SERIAL_TEAM_DECODE_BAD_VERSION;
+  }
+
+  frame->sequence = SerialProtocol_ReadU16LE(&data[4]);
+  for (uint8_t robot = 0U; robot < SERIAL_TEAM_ROBOT_COUNT; robot++)
+  {
+    const uint16_t offset = 6U + ((uint16_t)robot * SERIAL_TEAM_ROBOT_SLOT_LEN);
+    frame->robots[robot].vx_milli = SerialProtocol_ReadI16LE(&data[offset]);
+    frame->robots[robot].vy_milli = SerialProtocol_ReadI16LE(&data[offset + 2U]);
+    frame->robots[robot].omega_milli = SerialProtocol_ReadI16LE(&data[offset + 4U]);
+    frame->robots[robot].kick_power = data[offset + 6U];
+    frame->robots[robot].flags = data[offset + 7U];
+  }
+  return SERIAL_TEAM_DECODE_OK;
+}

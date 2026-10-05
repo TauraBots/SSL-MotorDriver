@@ -6,11 +6,36 @@ This module intentionally preserves the firmware packet layouts byte-for-byte.
 import math
 import struct
 import time
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class TeamRobotCommand:
+    """One eight-byte robot slot in a D1 AirPort Team frame."""
+
+    vx: float = 0.0
+    vy: float = 0.0
+    omega: float = 0.0
+    kick_power: int = 0
+    kick: bool = False
+    chip: bool = False
+    brake: bool = False
+    dribbler: bool = False
+    enabled: bool = False
 
 
 class Protocol:
     ROBOT_VELOCITY_TYPE = 0xD0
     ROBOT_VELOCITY_VERSION = 1
+    TEAM_VELOCITY_TYPE = 0xD1
+    TEAM_VELOCITY_VERSION = 0x01
+    TEAM_FRAME_SIZE = 32
+    TEAM_ROBOT_IDS = ("A", "B", "C")
+    TEAM_FLAG_KICK = 1 << 0
+    TEAM_FLAG_CHIP = 1 << 1
+    TEAM_FLAG_BRAKE = 1 << 2
+    TEAM_FLAG_DRIBBLER = 1 << 3
+    TEAM_FLAG_ENABLED = 1 << 4
     TELEMETRY_REQUEST_TYPE = 0xE0
     TELEMETRY_RESPONSE_TYPE = 0xE1
     DISCOVERY_REQUEST_TYPE = 0xE2
@@ -20,6 +45,7 @@ class Protocol:
     TELEMETRY_FLAG_MOTORS = 1 << 1
     TELEMETRY_FLAG_BATTERY = 1 << 2
     TELEMETRY_FLAG_DIAGNOSTICS = 1 << 3
+    TELEMETRY_FLAGS_FAST = TELEMETRY_FLAG_BASIC | TELEMETRY_FLAG_MOTORS
     TELEMETRY_FLAGS_FULL = 0x0F
     TELEMETRY_REPLY_WINDOW_S = 0.080
     TELEMETRY_RESPONSE_BASE_SIZE = 11
@@ -65,6 +91,40 @@ class Protocol:
                               cls.ROBOT_VELOCITY_VERSION, ord(robot_id), sequence & 0xFFFFFFFF,
                               *values, kick_power, 1 if brake else 0)
         return cls.with_crc(payload)
+
+    @staticmethod
+    def _team_milli_i16(value):
+        scaled = int(round(float(value) * 1000.0))
+        return max(-32768, min(32767, scaled))
+
+    @classmethod
+    def _pack_team_robot(cls, command):
+        flags = 0
+        flags |= cls.TEAM_FLAG_KICK if command.kick else 0
+        flags |= cls.TEAM_FLAG_CHIP if command.chip else 0
+        flags |= cls.TEAM_FLAG_BRAKE if command.brake else 0
+        flags |= cls.TEAM_FLAG_DRIBBLER if command.dribbler else 0
+        flags |= cls.TEAM_FLAG_ENABLED if command.enabled else 0
+        return struct.pack(
+            "<hhhBB",
+            cls._team_milli_i16(command.vx),
+            cls._team_milli_i16(command.vy),
+            cls._team_milli_i16(command.omega),
+            max(0, min(100, int(command.kick_power))),
+            flags,
+        )
+
+    @classmethod
+    def encode_team_velocity(cls, sequence, commands):
+        """Encode the firmware's fixed D1 frame with A, B and C in order."""
+        payload = bytearray((0x55, 0xAA, cls.TEAM_VELOCITY_TYPE,
+                             cls.TEAM_VELOCITY_VERSION))
+        payload.extend(struct.pack("<H", int(sequence) & 0xFFFF))
+        for robot_id in cls.TEAM_ROBOT_IDS:
+            payload.extend(cls._pack_team_robot(commands[robot_id]))
+        frame = cls.with_crc(bytes(payload))
+        assert len(frame) == cls.TEAM_FRAME_SIZE
+        return frame
 
     @classmethod
     def encode_telemetry_request(cls, robot_id, request_sequence, flags=TELEMETRY_FLAGS_FULL):

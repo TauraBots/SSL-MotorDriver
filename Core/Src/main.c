@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_c_api.h"
 #include "firmware_runtime.h"
+#include "kicker_board.h"
 #include "robot_identity.h"
 #include "serial_service.h"
 
@@ -35,6 +36,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define USART2_CONFIGURED_BAUD \
+  ((TAURA_COMM_MODE != COMM_MODE_MATCH) ? BENCH_UART_BAUD : \
+   ((TAURA_MATCH_TRANSPORT == MATCH_TRANSPORT_AIRPORT_TEAM) ? \
+    MATCH_AIRPORT_UART_BAUD : MATCH_CRSF_UART_BAUD))
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,6 +65,7 @@ DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -77,10 +83,24 @@ static void MX_TIM4_Init(void);
 static void MX_TIM5_Init(void);
 static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
+static void ApplyCommModeUartBaud(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void ApplyCommModeUartBaud(void)
+{
+  if (huart2.Init.BaudRate == USART2_CONFIGURED_BAUD)
+  {
+    return;
+  }
+
+  huart2.Init.BaudRate = USART2_CONFIGURED_BAUD;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -124,6 +144,8 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+  KickerBoard_Init(&hi2c2);
+  ApplyCommModeUartBaud();
   FirmwareRuntime_WatchdogInit();
   RobotIdentity_Init();
   AppC_Init(&hadc1, &htim1, &htim8, &htim5, &htim3, &htim2, &htim4, LED_GPIO_Port, LED_Pin);
@@ -149,6 +171,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     AppC_Tick();
     SerialService_Task();
+    KickerBoard_Task();
     FirmwareRuntime_WatchdogRefresh();
   }
   /* USER CODE END 3 */
@@ -686,7 +709,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 921600;
+  huart2.Init.BaudRate = 9600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;

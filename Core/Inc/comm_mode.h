@@ -1,0 +1,28 @@
+#pragma once
+
+#include <stdint.h>
+
+typedef enum
+{
+  COMM_MODE_BENCH = 0,
+  COMM_MODE_MATCH = 1
+} CommMode;
+
+#define BENCH_UART_BAUD 9600U
+#define MATCH_AIRPORT_UART_BAUD 9600U
+#define MATCH_CRSF_UART_BAUD 420000U
+
+#ifndef TAURA_COMM_MODE
+#define TAURA_COMM_MODE COMM_MODE_MATCH
+#endif
+
+typedef enum
+{
+  MATCH_TRANSPORT_CHANNELS = 0,
+  MATCH_TRANSPORT_TEAMFRAME = 1,
+  MATCH_TRANSPORT_AIRPORT_TEAM = 2
+} MatchTransport;
+
+#ifndef TAURA_MATCH_TRANSPORT
+#define TAURA_MATCH_TRANSPORT MATCH_TRANSPORT_AIRPORT_TEAM
+#endif

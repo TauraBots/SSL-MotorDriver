@@ -38,7 +38,19 @@ class DashboardPanel(QWidget):
             self.watchdog_card.update_status("—", "NO DATA", "off")
             for card in self.motor_cards: card.set_motor_data(0.0, 0, True); card.update_status("0 RPM", "NO DATA", "off")
             return
-        self.title.setText(f"ROBOT {robot.robot_id} OVERVIEW"); self.set_connected(robot.connected, robot.robot_id)
+        self.title.setText(f"ROBOT {robot.robot_id} OVERVIEW")
+        telemetry_online = robot.connected
+        control_ready = robot.can_control
+        self.global_status.setText("TELEMETRY OK" if telemetry_online else
+                                   "COMMAND ONLY" if control_ready else "OFFLINE")
+        self.global_status.setProperty("online", telemetry_online)
+        self.global_status.style().unpolish(self.global_status); self.global_status.style().polish(self.global_status)
+        self.communication_card.set_connection(telemetry_online)
+        if control_ready and not telemetry_online:
+            self.communication_card.update_status("NO TELEMETRY", "COMMAND ONLY", "warning")
+        self.robot_card.update_status(robot.robot_id,
+                                      "CONTROL READY" if control_ready else "NOT SELECTED",
+                                      "ok" if telemetry_online else "warning" if control_ready else "off")
         if robot.battery is not None: self.battery_card.set_voltage(robot.battery)
         else: self.battery_card.update_status("—", "NO DATA", "off"); self.battery_card.level.setValue(0)
         self.watchdog_card.update_status("OK" if robot.watchdog_ok else "NO DATA", robot.status, "ok" if robot.watchdog_ok else "off")

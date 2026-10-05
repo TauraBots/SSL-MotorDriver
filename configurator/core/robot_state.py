@@ -49,3 +49,7 @@ class RobotState:
     @property
     def rpm(self):
         return self.motor_rpm
+
+    @property
+    def can_control(self):
+        return self.discovered or self.connected

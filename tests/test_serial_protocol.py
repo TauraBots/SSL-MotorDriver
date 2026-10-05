@@ -1,15 +1,15 @@
-import importlib.util
 import struct
+import sys
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location(
-    "ssl_configurator_backend", ROOT / "scripts" / "ssl-configurator.py"
-)
-BACKEND = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(BACKEND)
+sys.path.insert(0, str(ROOT / "configurator"))
+
+from core.protocol import Protocol
+
+BACKEND = Protocol
 
 
 class SerialProtocolTests(unittest.TestCase):
@@ -24,14 +24,14 @@ class SerialProtocolTests(unittest.TestCase):
             frame.extend(struct.pack("<HH", 12000, 2048))
         if flags & BACKEND.TELEMETRY_FLAG_DIAGNOSTICS:
             frame.extend(struct.pack("<IIBI", 2, 30, 1, 22))
-        frame.extend(struct.pack("<H", BACKEND.crc16_ccitt_false(frame)))
+        frame.extend(struct.pack("<H", BACKEND.crc16(frame)))
         return bytes(frame)
 
     def test_crc_known_vector(self):
-        self.assertEqual(BACKEND.crc16_ccitt_false(b"123456789"), 0x29B1)
+        self.assertEqual(BACKEND.crc16(b"123456789"), 0x29B1)
 
     def test_robot_velocity_frame_layout(self):
-        frame = BACKEND.encode_robot_velocity_packet(
+        frame = BACKEND.encode_velocity(
             "B", 0x12345678, 1.25, -0.5, 3.0, kick_power=80, brake=1
         )
         self.assertEqual(len(frame), 19)
@@ -40,10 +40,10 @@ class SerialProtocolTests(unittest.TestCase):
             fields[:-1],
             (0xAA55, 0xD0, 1, ord("B"), 0x12345678, 1250, -500, 3000, 80, 1),
         )
-        self.assertEqual(fields[-1], BACKEND.crc16_ccitt_false(frame[:-2]))
+        self.assertEqual(fields[-1], BACKEND.crc16(frame[:-2]))
 
     def test_robot_velocity_frame_clamps_wire_values(self):
-        frame = BACKEND.encode_robot_velocity_packet(
+        frame = BACKEND.encode_velocity(
             "A", 1, 100.0, -100.0, 100.0, kick_power=200
         )
         fields = struct.unpack("<HBBBIhhhBBH", frame)
@@ -52,21 +52,21 @@ class SerialProtocolTests(unittest.TestCase):
 
     def test_motion_configuration_frame_layout(self):
         uid = bytes.fromhex("0123456789ABCDEF01234567")
-        frame = BACKEND.encode_motion_config_packet(uid, 4.0, 10.0)
+        frame = BACKEND.encode_motion_config(uid, 4.0, 10.0)
         self.assertEqual(len(frame), 29)
         fields = struct.unpack("<HB12sffIH", frame)
         self.assertEqual(fields[:3], (0xAA55, BACKEND.CONFIG_SET_MOTION_TYPE, uid))
         self.assertAlmostEqual(fields[3], 4.0)
         self.assertAlmostEqual(fields[4], 10.0)
         self.assertEqual(fields[5], BACKEND.CONFIG_KEY)
-        self.assertEqual(fields[6], BACKEND.crc16_ccitt_false(frame[:-2]))
+        self.assertEqual(fields[6], BACKEND.crc16(frame[:-2]))
 
     def test_motion_configuration_rejects_invalid_limits(self):
         uid = bytes(12)
         with self.assertRaises(ValueError):
-            BACKEND.encode_motion_config_packet(uid, 0.0, 10.0)
+            BACKEND.encode_motion_config(uid, 0.0, 10.0)
         with self.assertRaises(ValueError):
-            BACKEND.encode_motion_config_packet(uid, 4.0, 100.0)
+            BACKEND.encode_motion_config(uid, 4.0, 100.0)
 
     def test_telemetry_fault_bits_are_exposed(self):
         status = 1 | ((0x01 | 0x04 | 0x10) << 1)
@@ -80,7 +80,7 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertEqual(len(frame), 10)
         self.assertEqual(struct.unpack("<HBBBHBH", frame)[:-1],
                          (0xAA55, 0xE0, 1, ord("C"), 100, BACKEND.TELEMETRY_FLAG_BATTERY))
-        self.assertEqual(struct.unpack_from("<H", frame, 8)[0], BACKEND.crc16_ccitt_false(frame[:8]))
+        self.assertEqual(struct.unpack_from("<H", frame, 8)[0], BACKEND.crc16(frame[:8]))
 
     def test_each_optional_group_is_independent(self):
         cases = (

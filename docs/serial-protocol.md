@@ -110,9 +110,11 @@ Use `python scripts/ssl-configurator.py --help` para listar as acoes disponiveis
 A aba `ANÁLISE CSV` gera os gráficos dos arquivos gravados pelo aplicativo.
 
 Somente uma mudanca de `sequence` torna o comando novo. Frames repetidos nao
-renovam o watchdog. Sem uma nova sequencia por 150 ms, os quatro setpoints sao
-zerados, o freio e ativado, os estados dos PIDs sao limpos e `kick_power` volta
-a zero. O kicker ainda nao possui acionamento fisico neste firmware.
+renovam o watchdog. O D1 AirPort possui um watchdog MATCH de 120 ms; depois que
+o comando chega ao AppC, permanece tambem a protecao interna de 150 ms. Em
+timeout, os quatro setpoints sao zerados, o freio e ativado, os estados dos PIDs
+sao limpos e `kick_power` volta a zero. O kicker ainda nao possui acionamento
+fisico neste firmware.
 
 ## Telemetria enviada
 

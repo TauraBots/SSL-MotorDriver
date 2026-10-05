@@ -264,6 +264,8 @@ def parse_args():
     app = actions.add_parser("app", help="Open the graphical configurator")
     app.add_argument("--port", help="Initial serial port")
     app.add_argument("--baud", type=int, default=9600)
+    app.add_argument("--fleet-ids", default="",
+                     help="Manual robot IDs to poll without relying on discovery, for example A,B")
 
     drive = actions.add_parser("drive", help="Drive one robot with live telemetry")
     drive.add_argument("--port", required=True, help="Serial port, for example COM3")
@@ -446,7 +448,10 @@ class ConfiguratorApp:
         self.port_box = ttk.Combobox(connection, textvariable=self.port_var, width=17)
         self.port_box.pack(side="left", padx=(8, 18))
         self.label(connection, "Baud", color=self.MUTED).pack(side="left")
-        ttk.Combobox(connection, textvariable=self.baud_var, values=("9600", "115200", "1000000"), width=10).pack(side="left", padx=8)
+        ttk.Combobox(connection, textvariable=self.baud_var,
+                     values=("9600", "14400", "19200", "38400", "115200",
+                             "921600", "1000000"),
+                     width=10).pack(side="left", padx=8)
         self.button(connection, "↻", self.refresh_ports).pack(side="left", padx=6)
         self.connect_button = self.button(connection, "CONECTAR", self.toggle_connection, accent=True)
         self.connect_button.pack(side="right")

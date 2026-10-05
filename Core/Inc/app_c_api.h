@@ -1,6 +1,7 @@
 #pragma once
 
 #include "main.h"
+#include "robot_command.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -63,6 +64,7 @@ void AppC_SetCommands(uint32_t sequence,
 void AppC_SetRobotVelocity(uint32_t sequence,
                            float vx, float vy, float omega,
                            uint8_t kick_power, uint8_t brake_mode);
+void AppC_ApplyRobotCommand(const RobotCommand *command);
 void AppC_GetTelemetry(AppC_Telemetry *out);
 void AppC_ForceSafeState(void);
 void AppC_SetMotionLimits(float max_linear_accel,

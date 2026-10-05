@@ -2,6 +2,7 @@
 
 #include "app.hpp"
 #include "acceleration_limiter.hpp"
+#include "kicker_board.h"
 #include "omni_kinematics.hpp"
 #include <cmath>
 
@@ -43,6 +44,7 @@ uint32_t g_lastSequenceTick = 0U;
 uint8_t g_hasCommand = 0U;
 uint8_t g_communicationOk = 0U;
 uint8_t g_kickPower = 0U;
+uint8_t g_safeStateActive = 0U;
 inline float ClampSetpoint(float x)
 {
   if (x > kSetpointMaxRpm)
@@ -106,11 +108,18 @@ bool AcceptCommandLocked(uint32_t sequence, uint8_t kickPower, uint8_t brakeMode
   live_comm_accepted_packets++;
   live_comm_state = 1U;
   live_comm_kick_power = g_kickPower;
+  g_safeStateActive = 0U;
   return true;
 }
 
 void EnterSafeState()
 {
+  KickerBoard_CancelPendingKick();
+  if (g_safeStateActive == 0U)
+  {
+    (void)KickerBoard_RequestSafeStop();
+    g_safeStateActive = 1U;
+  }
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   setpoint_m1 = 0.0f;
@@ -190,9 +199,7 @@ extern "C" void AppC_FastTick1kHz(void)
 {
   if ((g_cartesianCommand != 0U) && (g_communicationOk != 0U))
   {
-    const bool braking = (stop_mode_brake != 0U) ||
-                         ((g_desiredVx == 0.0f) && (g_desiredVy == 0.0f) &&
-                          (g_desiredOmega == 0.0f));
+    const bool braking = (stop_mode_brake != 0U);
     const LimitedRobotVelocity applied = g_accelerationLimiter.Update(
         g_desiredVx, g_desiredVy, g_desiredOmega, kControlDtS, braking);
     float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -261,14 +268,46 @@ extern "C" void AppC_SetRobotVelocity(uint32_t sequence,
                                         float vx, float vy, float omega,
                                         uint8_t kick_power, uint8_t brake_mode)
 {
+  RobotCommand command{};
+  command.vx = vx;
+  command.vy = vy;
+  command.omega = omega;
+  command.kick_power = kick_power;
+  command.kick = (kick_power > 0U) ? 1U : 0U;
+  command.chip = 0U;
+  command.brake = brake_mode;
+  command.dribbler = 0U;
+  command.enabled = 1U;
+  command.sequence = sequence;
+  AppC_ApplyRobotCommand(&command);
+}
+
+extern "C" void AppC_ApplyRobotCommand(const RobotCommand *command)
+{
+  if (command == nullptr)
+  {
+    return;
+  }
+
+  if (command->enabled == 0U)
+  {
+    EnterSafeState();
+    return;
+  }
+
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
-  if (AcceptCommandLocked(sequence, kick_power, brake_mode))
+  const uint8_t kickPower = (command->kick != 0U) ? command->kick_power : 0U;
+  if (AcceptCommandLocked(command->sequence, kickPower, command->brake))
   {
-    g_desiredVx = vx;
-    g_desiredVy = vy;
-    g_desiredOmega = omega;
+    g_desiredVx = command->vx;
+    g_desiredVy = command->vy;
+    g_desiredOmega = command->omega;
     g_cartesianCommand = 1U;
+    if ((command->kick != 0U) && (command->kick_power >= 1U))
+    {
+      (void)KickerBoard_RequestAutoKick(command->kick_power);
+    }
   }
   if (primask == 0U)
   {
@@ -328,6 +367,9 @@ extern "C" void AppC_SetMotionLimits(float max_linear_accel,
 
 extern "C" void AppC_EmergencyStop(void)
 {
+  KickerBoard_CancelPendingKick();
+  (void)KickerBoard_RequestSafeStop();
+  g_safeStateActive = 1U;
   TIM1->CCER = 0U;
   TIM8->CCER = 0U;
   TIM1->BDTR &= ~TIM_BDTR_MOE;

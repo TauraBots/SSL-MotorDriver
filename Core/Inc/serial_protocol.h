@@ -17,9 +17,11 @@
 #define SERIAL_TYPE_DISCOVERY_REQUEST 0xE2U
 #define SERIAL_TYPE_DISCOVERY_RESPONSE 0xE3U
 #define SERIAL_TYPE_ROBOT_VELOCITY 0xD0U
+#define SERIAL_TYPE_TEAM_VELOCITY 0xD1U
 
 #define SERIAL_COMMAND_PACKET_LEN 19U
 #define SERIAL_ROBOT_VELOCITY_PACKET_LEN 19U
+#define SERIAL_TEAM_VELOCITY_PACKET_LEN 32U
 #define SERIAL_CONFIG_DISCOVER_PACKET_LEN 9U
 #define SERIAL_CONFIG_SET_ID_PACKET_LEN 22U
 #define SERIAL_CONFIG_RESPONSE_PACKET_LEN 23U
@@ -30,11 +32,44 @@
 #define SERIAL_DISCOVERY_RESPONSE_PACKET_LEN 27U
 
 #define SERIAL_ROBOT_VELOCITY_PROTOCOL_VERSION 1U
+#define SERIAL_TEAM_VELOCITY_PROTOCOL_VERSION 1U
 #define SERIAL_TELEMETRY_PROTOCOL_VERSION 1U
 #define SERIAL_DISCOVERY_PROTOCOL_VERSION 1U
 #define SERIAL_FIRMWARE_VERSION_MAJOR 1U
 #define SERIAL_FIRMWARE_VERSION_MINOR 0U
 #define SERIAL_FIRMWARE_VERSION_PATCH 0U
+
+#define SERIAL_TEAM_ROBOT_COUNT 3U
+#define SERIAL_TEAM_ROBOT_SLOT_LEN 8U
+#define SERIAL_TEAM_FLAG_KICK      (1U << 0)
+#define SERIAL_TEAM_FLAG_CHIP      (1U << 1)
+#define SERIAL_TEAM_FLAG_BRAKE     (1U << 2)
+#define SERIAL_TEAM_FLAG_DRIBBLER  (1U << 3)
+#define SERIAL_TEAM_FLAG_ENABLED   (1U << 4)
+
+typedef struct
+{
+  int16_t vx_milli;
+  int16_t vy_milli;
+  int16_t omega_milli;
+  uint8_t kick_power;
+  uint8_t flags;
+} SerialTeamRobotSlot;
+
+typedef struct
+{
+  uint16_t sequence;
+  SerialTeamRobotSlot robots[SERIAL_TEAM_ROBOT_COUNT];
+} SerialTeamVelocityFrame;
+
+typedef enum
+{
+  SERIAL_TEAM_DECODE_OK = 0,
+  SERIAL_TEAM_DECODE_BAD_LENGTH,
+  SERIAL_TEAM_DECODE_BAD_FORMAT,
+  SERIAL_TEAM_DECODE_BAD_CRC,
+  SERIAL_TEAM_DECODE_BAD_VERSION
+} SerialTeamDecodeResult;
 
 uint16_t SerialProtocol_Crc16(const uint8_t *data, uint16_t len);
 uint16_t SerialProtocol_ReadU16LE(const uint8_t *data);
@@ -44,3 +79,5 @@ void SerialProtocol_WriteU16LE(uint8_t *data, uint16_t value);
 void SerialProtocol_WriteU32LE(uint8_t *data, uint32_t value);
 void SerialProtocol_WriteI16LE(uint8_t *data, int16_t value);
 int16_t SerialProtocol_SaturateI16(float value);
+SerialTeamDecodeResult SerialProtocol_DecodeTeamVelocity(
+    const uint8_t *data, uint16_t len, SerialTeamVelocityFrame *frame);

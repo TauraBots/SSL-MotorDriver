@@ -14,6 +14,11 @@ class ConfigPanel(QWidget):
         super().__init__(parent); layout = QVBoxLayout(self); layout.setContentsMargins(28, 24, 28, 24); layout.setSpacing(16)
         title = QLabel("CONFIGURAÇÃO"); title.setObjectName("pageTitle"); layout.addWidget(title)
         subtitle = QLabel("Identidade persistente e limites de movimento por placa."); subtitle.setObjectName("muted"); layout.addWidget(subtitle)
+        service_notice = QLabel(
+            "Para configuração confiável via AirPort, mantenha apenas o "
+            "robô/RX alvo ativo no uplink.")
+        service_notice.setObjectName("muted"); service_notice.setWordWrap(True)
+        layout.addWidget(service_notice)
         discovery = CardWidget(); row = QHBoxLayout(); self.discover_button = QPushButton("DESCOBRIR PLACAS"); self.discover_button.clicked.connect(self.discover_requested); row.addWidget(self.discover_button)
         self.discovery_status = QLabel("Aguardando descoberta"); row.addWidget(self.discovery_status, 1); discovery.content.addLayout(row)
         self.boards = QListWidget(); self.boards.currentRowChanged.connect(self.board_selected); discovery.content.addWidget(self.boards); layout.addWidget(discovery)
