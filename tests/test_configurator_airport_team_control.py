@@ -24,6 +24,18 @@ def load_bridge():
 BRIDGE = load_bridge()
 
 
+def load_cli_configurator():
+    path = ROOT / "configurator" / "ssl-configurator.py"
+    spec = importlib.util.spec_from_file_location("ssl_configurator_cli", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+CLI = load_cli_configurator()
+
+
 class FakeSerial:
     is_open = True
 
@@ -74,6 +86,17 @@ class TeamProtocolTests(unittest.TestCase):
             BRIDGE.RobotCommand(omega=-1.0),
         )
         self.assertEqual(frame, reference)
+
+    def test_cli_kicker_test_encoder_targets_only_selected_robot(self):
+        low = CLI.encode_team_kicker_test_packet("C", 0x1234)
+        high = CLI.encode_team_kicker_test_packet("C", 0x1235, kick_power=20)
+        self.assertEqual(low[:6], bytes((0x55, 0xAA, 0xD1, 0x01, 0x34, 0x12)))
+        self.assertEqual(struct.unpack_from("<H", high, 30)[0], Protocol.crc16(high[:-2]))
+        self.assertEqual(slot(high, "A"), (0, 0, 0, 0, Protocol.TEAM_FLAG_BRAKE))
+        self.assertEqual(slot(high, "B"), (0, 0, 0, 0, Protocol.TEAM_FLAG_BRAKE))
+        self.assertEqual(slot(high, "C")[:4], (0, 0, 0, 20))
+        self.assertEqual(slot(high, "C")[4], Protocol.TEAM_FLAG_BRAKE |
+                         Protocol.TEAM_FLAG_ENABLED | Protocol.TEAM_FLAG_KICK)
 
 
 class TeamControlTests(unittest.TestCase):
@@ -129,6 +152,25 @@ class TeamControlTests(unittest.TestCase):
         cleared = self.serial.frames[-1]
         self.assertEqual(slot(cleared, "B")[3], 0)
         self.assertFalse(slot(cleared, "B")[4] & Protocol.TEAM_FLAG_KICK)
+
+    def test_kicker_radio_test_has_two_low_frames_then_one_kick(self):
+        self.radio.select_robot("B")
+        self.radio.set_motion_target(1.0, 2.0, 3.0)
+        self.assertTrue(self.radio.queue_kicker_test(20))
+        self.assertEqual(self.radio._target, (0.0, 0.0, 0.0))
+        self.assertTrue(self.radio._brake)
+
+        powers = [self.radio._take_pending_kick() for _ in range(4)]
+        self.assertEqual(powers, [0, 0, 20, 0])
+
+        for power in powers:
+            self.radio.send_command(0.0, 0.0, 0.0, kick_power=power, brake=True)
+        frames = self.serial.frames[-4:]
+        self.assertFalse(slot(frames[0], "B")[4] & Protocol.TEAM_FLAG_KICK)
+        self.assertFalse(slot(frames[1], "B")[4] & Protocol.TEAM_FLAG_KICK)
+        self.assertEqual(slot(frames[2], "B")[3], 20)
+        self.assertTrue(slot(frames[2], "B")[4] & Protocol.TEAM_FLAG_KICK)
+        self.assertFalse(slot(frames[3], "B")[4] & Protocol.TEAM_FLAG_KICK)
 
     def test_deselect_disables_only_selected_robot(self):
         self.radio.select_robot("A"); self.radio.send_command(0.5, 0.0, 0.0)

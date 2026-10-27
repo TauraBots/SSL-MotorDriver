@@ -128,6 +128,11 @@ class SerialManager(QObject):
     def queue_kick(self, power):
         self._kick_power = max(0, min(100, int(power))); self._kick_pending = True
 
+    def _take_pending_kick(self):
+        kick = self._kick_power if self._kick_pending else 0
+        self._kick_pending = False
+        return kick
+
     def send_command(self, vx, vy, omega, kick_power=0, brake=False):
         if not self.is_connected: return
         self._sequence = (self._sequence + 1) & 0xFFFFFFFF
@@ -211,10 +216,9 @@ class SerialManager(QObject):
             # command and telemetry share a scheduler wake-up.
             if due.command:
                 motion = self._limited_motion(now)
-                kick = self._kick_power if self._kick_pending else 0
+                kick = self._take_pending_kick()
                 self.send_command(*motion, kick_power=kick,
                                   brake=self._command_brake(motion))
-                self._kick_pending = False
             if due.telemetry:
                 telemetry_sent = self.send_telemetry_request(
                     self._telemetry_flags_for_next_request(now_ns))

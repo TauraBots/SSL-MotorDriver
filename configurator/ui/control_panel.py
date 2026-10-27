@@ -7,6 +7,7 @@ from .widgets import JoystickWidget, LedIndicator
 
 class ControlPanel(QWidget):
     kick_requested = Signal(int); virtual_key = Signal(str, bool)
+    kicker_test_requested = Signal(int)
     joystick_changed = Signal(float, float, float); stop_requested = Signal()
 
     def __init__(self, args, parent=None):
@@ -30,6 +31,13 @@ class ControlPanel(QWidget):
             row = QHBoxLayout(); name_label = QLabel(name); name_label.setObjectName("cardTitle"); row.addWidget(name_label); row.addStretch(); value = QLabel(f"0.00 {unit}"); value.setObjectName("commandValue"); row.addWidget(value); command_card.content.addLayout(row); self.command.append((value, unit))
         command_card.content.addStretch(); kick_row = QHBoxLayout(); self.kick = QSpinBox(); self.kick.setRange(0, 100); self.kick.setValue(80); self.kick.setSuffix(" %"); kick_row.addWidget(QLabel("KICK POWER")); kick_row.addWidget(self.kick)
         kick_button = QPushButton("KICK"); kick_button.clicked.connect(lambda: self.kick_requested.emit(self.kick.value())); kick_row.addWidget(kick_button); command_card.content.addLayout(kick_row)
+        kicker_test_row = QHBoxLayout()
+        self.kicker_test_power = QSpinBox(); self.kicker_test_power.setRange(1, 100); self.kicker_test_power.setValue(20); self.kicker_test_power.setSuffix(" %")
+        kicker_test_row.addWidget(QLabel("TESTE VIA RÁDIO")); kicker_test_row.addWidget(self.kicker_test_power)
+        kicker_test = QPushButton("TESTAR KICKER")
+        kicker_test.setToolTip("Para o robô, envia dois frames sem kick, um pulso de kick e retorna a zero.")
+        kicker_test.clicked.connect(lambda: self.kicker_test_requested.emit(self.kicker_test_power.value()))
+        kicker_test_row.addWidget(kicker_test); command_card.content.addLayout(kicker_test_row)
         stop = QPushButton("STOP ROBOT"); stop.setObjectName("stopButton"); stop.clicked.connect(self.stop_requested); command_card.content.addWidget(stop)
         body.addWidget(joystick_card, 3); body.addWidget(command_card, 2); layout.addLayout(body, 1)
         self.set_active_robot(None)

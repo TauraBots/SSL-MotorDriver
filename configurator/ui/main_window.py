@@ -109,7 +109,7 @@ class MainWindow(QMainWindow):
         self.header_connect.clicked.connect(self.toggle_connection); self.header_refresh.clicked.connect(self.refresh_ports)
         self.header_profile.currentIndexChanged.connect(self.change_radio_profile)
         self.header_baud.currentTextChanged.connect(lambda: self.update_link_metrics())
-        self.control.kick_requested.connect(self.queue_kick); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
+        self.control.kick_requested.connect(self.queue_kick); self.control.kicker_test_requested.connect(self.test_kicker_via_radio); self.control.virtual_key.connect(self.set_virtual_key); self.control.joystick_changed.connect(self.set_joystick_command); self.control.stop_requested.connect(self.emergency_stop)
         self.telemetry.log_requested.connect(self.toggle_log); self.fleet.robot_selected.connect(self.select_fleet_robot); self.fleet.discovery_requested.connect(self.manager.discover_robots); self.config.discover_requested.connect(self.discover); self.config.set_id_requested.connect(self.set_id); self.config.set_motion_requested.connect(self.set_motion); self.config.board_selected.connect(self.select_board); self.analysis.generate_requested.connect(self.generate_plots)
         self.manager.connected.connect(self.on_connected); self.manager.disconnected.connect(self.on_disconnected); self.manager.telemetry_received.connect(self.update_telemetry); self.manager.command_sent.connect(self.command_sent); self.manager.telemetry_lost.connect(self.telemetry_lost); self.manager.error.connect(self.on_communication_error)
         self.manager.boards_discovered.connect(self.show_boards); self.manager.board_configured.connect(self.configuration_succeeded); self.manager.motion_configured.connect(self.motion_configuration_succeeded); self.manager.configuration_finished.connect(self.finish_config_action); self.plots_ready.connect(self.on_plots_ready)
@@ -217,6 +217,25 @@ class MainWindow(QMainWindow):
     def queue_kick(self, power):
         if self.can_control(): self.manager.queue_kick(power)
         else: self.warn_no_control_target()
+
+    def test_kicker_via_radio(self, power):
+        if not self.can_control():
+            self.warn_no_control_target(); return
+        robot = self.manager.robots.active_robot
+        answer = QMessageBox.warning(
+            self, "Teste do kicker via rádio",
+            f"O robô {robot.robot_id} será parado e o kicker será acionado a {power}%.\n\n"
+            "Afaste pessoas e objetos da frente do robô antes de continuar.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if self.manager.queue_kicker_test(power):
+            self.control.reset_joystick()
+            self.pressed_keys.clear()
+            self.toast(f"Teste do kicker enviado ao robô {robot.robot_id} a {power}%", "warning")
+        else:
+            self.warn_no_control_target()
 
     def warn_no_control_target(self):
         now = time.monotonic()
