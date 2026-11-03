@@ -29,6 +29,7 @@ public:
   void ResetPidStates();
   void ForceSafeOutputs();
   uint8_t FaultStatus() const;
+  void EncoderWheelRadS(float out[4]) const;
 
 private:
   struct PidState
@@ -51,7 +52,7 @@ private:
   void UpdateBattery();
   void ApplyMotors();
   float LowPassStep(BiquadState &f, float x);
-  float ComputePid(PidState &pid, float setpointRpm, float measuredRpm, float dtS);
+  float ComputePid(PidState &pid, float setpointRpm, float measuredRpm, float dtS, uint32_t motorIndex);
   float ApplyStaticPwm(float setpointRpm, float measuredRpm, float piOut, uint32_t motorIndex);
   void ResetPi(PidState &pid);
   int32_t ApplyEncoderFaultProtection(uint32_t motorIndex, PidState &pid, float setpointRpm, float measuredRpm, int32_t cmd);

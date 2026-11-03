@@ -16,6 +16,12 @@ volatile uint32_t live_comm_duplicate_packets = 0U;
 volatile uint32_t live_comm_stale_packets = 0U;
 volatile uint8_t live_comm_state = 0U;
 volatile uint8_t live_comm_kick_power = 0U;
+volatile float dbg_motion_desired_xy[2] = {};
+volatile float dbg_motion_limited_xy[2] = {};
+volatile float dbg_motion_delta_theta = 0.0f;
+volatile float dbg_motion_measured_omega = 0.0f;
+volatile float dbg_motion_saturation_scale = 1.0f;
+volatile uint8_t dbg_motion_rotation_source = 0U; // 0 unavailable; 1 encoder odometry
 volatile float dbg_yaw_omega_cmd_rad_s = 0.0f;
 volatile float dbg_yaw_omega_limited_rad_s = 0.0f;
 volatile float dbg_yaw_wheel_raw_rpm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -28,8 +34,8 @@ namespace
 {
 App *g_app = nullptr;
 constexpr float kSetpointMaxRpm = 530.0f;
-constexpr float kWheelRadiusM = 0.03f;
-constexpr float kRobotRadiusM = 0.09f;
+constexpr float kWheelRadiusM = ROBOT_WHEEL_RADIUS_M;
+constexpr float kRobotRadiusM = ROBOT_CENTER_WHEEL_DISTANCE_M;
 constexpr float kRadSToRpm = 9.5492966f;
 constexpr float kControlDtS = 0.001f;
 constexpr uint32_t kCommunicationTimeoutMs = 150U;
@@ -47,6 +53,7 @@ uint8_t g_kickPower = 0U;
 uint8_t g_safeStateActive = 0U;
 inline float ClampSetpoint(float x)
 {
+  if (!std::isfinite(x)) return 0.0f;
   if (x > kSetpointMaxRpm)
   {
     return kSetpointMaxRpm;
@@ -135,6 +142,11 @@ void EnterSafeState()
   g_desiredVy = 0.0f;
   g_desiredOmega = 0.0f;
   g_accelerationLimiter.Reset();
+  dbg_motion_desired_xy[0] = dbg_motion_desired_xy[1] = 0.0f;
+  dbg_motion_limited_xy[0] = dbg_motion_limited_xy[1] = 0.0f;
+  dbg_motion_delta_theta = dbg_motion_measured_omega = 0.0f;
+  dbg_motion_rotation_source = 0U;
+  dbg_motion_saturation_scale = 1.0f;
   dbg_yaw_omega_cmd_rad_s = 0.0f;
   dbg_yaw_omega_limited_rad_s = 0.0f;
   for (uint8_t i = 0U; i < 4U; i++)
@@ -197,11 +209,35 @@ extern "C" void AppC_Tick(void)
 
 extern "C" void AppC_FastTick1kHz(void)
 {
+  // Enforce the existing timeout even when the foreground task is delayed.
+  if ((g_communicationOk != 0U) &&
+      ((HAL_GetTick() - g_lastSequenceTick) >= kCommunicationTimeoutMs))
+    EnterSafeState();
   if ((g_cartesianCommand != 0U) && (g_communicationOk != 0U))
   {
+    // Previous 10 ms encoder window: avoids command/execution mismatch and
+    // the extra PID feedback biquad delay. No command-based fallback.
+    float measuredW[4] = {};
+    dbg_motion_rotation_source = 0U;
+    float measuredOmega = 0.0f;
+    if ((g_app != nullptr) && (g_app->FaultStatus() == 0U))
+    {
+      g_app->EncoderWheelRadS(measuredW);
+      bool valid = true;
+      for (float w : measuredW)
+        valid = valid && std::isfinite(w) && (std::fabs(w) < 104.72f);
+      if (valid)
+      {
+        measuredOmega = g_kinematics.WheelsToRobot(measuredW).omega;
+        dbg_motion_rotation_source = 1U;
+      }
+    }
+    dbg_motion_measured_omega = measuredOmega;
+    dbg_motion_delta_theta = measuredOmega * kControlDtS;
     const bool braking = (stop_mode_brake != 0U);
     const LimitedRobotVelocity applied = g_accelerationLimiter.Update(
-        g_desiredVx, g_desiredVy, g_desiredOmega, kControlDtS, braking);
+        g_desiredVx, g_desiredVy, g_desiredOmega, kControlDtS, braking,
+        dbg_motion_delta_theta);
     float wheelRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float wheelRawRadS[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     g_kinematics.RobotToWheels(
@@ -210,6 +246,18 @@ extern "C" void AppC_FastTick1kHz(void)
     setpoint_m2 = ClampSetpoint(wheelRadS[1] * kRadSToRpm);
     setpoint_m3 = ClampSetpoint(wheelRadS[2] * kRadSToRpm);
     setpoint_m4 = ClampSetpoint(wheelRadS[3] * kRadSToRpm);
+    dbg_motion_desired_xy[0] = g_desiredVx;
+    dbg_motion_desired_xy[1] = g_desiredVy;
+    dbg_motion_limited_xy[0] = applied.vx;
+    dbg_motion_limited_xy[1] = applied.vy;
+    float maxRaw = 0.0f;
+    float maxLimited = 0.0f;
+    for (uint8_t i = 0; i < 4; ++i)
+    {
+      maxRaw = std::fmax(maxRaw, std::fabs(wheelRawRadS[i]));
+      maxLimited = std::fmax(maxLimited, std::fabs(wheelRadS[i]));
+    }
+    dbg_motion_saturation_scale = maxRaw > 0.0f ? maxLimited / maxRaw : 1.0f;
     dbg_yaw_omega_cmd_rad_s = g_desiredOmega;
     dbg_yaw_omega_limited_rad_s = applied.omega;
     for (uint8_t i = 0U; i < 4U; i++)
@@ -217,15 +265,17 @@ extern "C" void AppC_FastTick1kHz(void)
       dbg_yaw_wheel_raw_rpm[i] = wheelRawRadS[i] * kRadSToRpm;
       dbg_yaw_wheel_limited_rpm[i] = wheelRadS[i] * kRadSToRpm;
     }
-    dbg_yaw_pid_reference_rpm[0] = setpoint_m1;
-    dbg_yaw_pid_reference_rpm[1] = setpoint_m2;
-    dbg_yaw_pid_reference_rpm[2] = setpoint_m3;
-    dbg_yaw_pid_reference_rpm[3] = setpoint_m4;
   }
   if (g_app != nullptr)
   {
     g_app->FastTick1kHz();
+    // Do not accumulate an unapplied ramp behind battery/encoder protection.
+    if (g_app->FaultStatus() != 0U) g_accelerationLimiter.Reset();
   }
+  dbg_yaw_pid_reference_rpm[0] = setpoint_m1;
+  dbg_yaw_pid_reference_rpm[1] = setpoint_m2;
+  dbg_yaw_pid_reference_rpm[2] = setpoint_m3;
+  dbg_yaw_pid_reference_rpm[3] = setpoint_m4;
   dbg_yaw_feedback_rpm[0] = rpm_m1;
   dbg_yaw_feedback_rpm[1] = rpm_m2;
   dbg_yaw_feedback_rpm[2] = rpm_m3;
@@ -236,6 +286,12 @@ extern "C" void AppC_SetCommands(uint32_t sequence,
                                   float m1, float m2, float m3, float m4,
                                   uint8_t kick_power, uint8_t brake_mode)
 {
+  if (!std::isfinite(m1) || !std::isfinite(m2) ||
+      !std::isfinite(m3) || !std::isfinite(m4))
+  {
+    EnterSafeState();
+    return;
+  }
   const float newSetpointM1 = ClampSetpoint(m1);
   const float newSetpointM2 = ClampSetpoint(m2);
   const float newSetpointM3 = ClampSetpoint(m3);
@@ -289,6 +345,12 @@ extern "C" void AppC_ApplyRobotCommand(const RobotCommand *command)
     return;
   }
 
+  if (!std::isfinite(command->vx) || !std::isfinite(command->vy) ||
+      !std::isfinite(command->omega))
+  {
+    EnterSafeState();
+    return;
+  }
   if (command->enabled == 0U)
   {
     EnterSafeState();

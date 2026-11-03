@@ -174,6 +174,15 @@ void App::ForceSafeOutputs()
   cmd_m1 = cmd_m2 = cmd_m3 = cmd_m4 = 0;
 }
 
+void App::EncoderWheelRadS(float out[4]) const
+{
+  constexpr float rpmToRadS = 0.1047197551f;
+  out[0] = e1_.Rpm() * rpmToRadS;
+  out[1] = e2_.Rpm() * rpmToRadS;
+  out[2] = e3_.Rpm() * rpmToRadS;
+  out[3] = e4_.Rpm() * rpmToRadS;
+}
+
 uint8_t App::FaultStatus() const
 {
   uint8_t status = 0U;
@@ -282,10 +291,10 @@ void App::ApplyMotors()
     return;
   }
 
-  const float piOut1 = ComputePid(pid1_, setpoint_m1, rpm_m1, kControlDtS);
-  const float piOut2 = ComputePid(pid2_, setpoint_m2, rpm_m2, kControlDtS);
-  const float piOut3 = ComputePid(pid3_, setpoint_m3, rpm_m3, kControlDtS);
-  const float piOut4 = ComputePid(pid4_, setpoint_m4, rpm_m4, kControlDtS);
+  const float piOut1 = ComputePid(pid1_, setpoint_m1, rpm_m1, kControlDtS, 0U);
+  const float piOut2 = ComputePid(pid2_, setpoint_m2, rpm_m2, kControlDtS, 1U);
+  const float piOut3 = ComputePid(pid3_, setpoint_m3, rpm_m3, kControlDtS, 2U);
+  const float piOut4 = ComputePid(pid4_, setpoint_m4, rpm_m4, kControlDtS, 3U);
   int32_t out1 = static_cast<int32_t>(std::lround(ApplyStaticPwm(setpoint_m1, rpm_m1, piOut1, 0U)));
   int32_t out2 = static_cast<int32_t>(std::lround(ApplyStaticPwm(setpoint_m2, rpm_m2, piOut2, 1U)));
   int32_t out3 = static_cast<int32_t>(std::lround(ApplyStaticPwm(setpoint_m3, rpm_m3, piOut3, 2U)));
@@ -320,7 +329,7 @@ void App::ApplyMotors()
 float App::ComputePid(PidState &pid,
                       float setpointRpm,
                       float measuredRpm,
-                      float dtS)
+                      float dtS, uint32_t motorIndex)
 {
   if (std::fabs(setpointRpm) < kZeroSetpointRpm)
   {
@@ -344,7 +353,10 @@ float App::ComputePid(PidState &pid,
     integralCandidate = pid.outMin;
 
   const float candidateOutput =
-      pTerm + integralCandidate + dTerm;
+      pTerm + integralCandidate + dTerm +
+      ApplyStaticPwm(setpointRpm, measuredRpm, 0.0f, motorIndex);
+  // Account for the feedforward added after PID when deciding whether to
+  // integrate. Otherwise the final PWM can clip while the integrator grows.
 
   const bool saturatingHigh =
       (candidateOutput > pid.outMax) && (error > 0.0f);

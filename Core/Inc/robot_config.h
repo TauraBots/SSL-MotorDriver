@@ -11,12 +11,16 @@
 
 #if ROBOT_CONFIG_PROFILE == 1
 
+/* Confirmed effective geometry. */
+#define ROBOT_WHEEL_RADIUS_M 0.03175f
+#define ROBOT_CENTER_WHEEL_DISTANCE_M 0.07715f
+
 /* Motion acceleration limits. */
 #define ROBOT_MAX_LINEAR_ACCEL 4.0f   /* m/s^2 */
 #define ROBOT_MAX_ANGULAR_ACCEL 10.0f /* rad/s^2 */
 #define ROBOT_MAX_BRAKE_ACCEL 7.0f    /* m/s^2 */
 
-/* Motion speed limits. Reserved for the motion-command validation layer. */
+/* Motion speed limits. Enforced by AccelerationLimiter. */
 #define ROBOT_MAX_LINEAR_SPEED 2.5f  /* m/s */
 #define ROBOT_MAX_ANGULAR_SPEED 8.0f /* rad/s */
 
