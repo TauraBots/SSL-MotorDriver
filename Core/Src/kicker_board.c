@@ -12,8 +12,10 @@
 #define KICKER_STATUS_HEADER 0xA5U
 #define KICKER_STATUS_VERSION 0x01U
 #define KICKER_I2C_TX_TIMEOUT_MS 2U
-#define KICKER_I2C_STATUS_TIMEOUT_MS 10U
-#define KICKER_STATUS_PERIOD_MS 100U
+#define KICKER_I2C_STATUS_TIMEOUT_MS 30U
+#define KICKER_STATUS_PERIOD_MS 20U
+#define KICKER_STATUS_RETRY_MS 5U
+#define KICKER_I2C_RECOVERY_THRESHOLD 3U
 
 typedef enum
 {
@@ -41,12 +43,42 @@ volatile uint32_t kicker_dbg_crc_errors = 0U;
 volatile uint32_t kicker_dbg_invalid_status = 0U;
 volatile uint32_t kicker_dbg_task_calls = 0U;
 volatile uint32_t kicker_dbg_status_reads = 0U;
+volatile uint32_t kicker_dbg_i2c_recoveries = 0U;
 
 static I2C_HandleTypeDef *kicker_i2c = NULL;
 static KickerBoardState kicker_state = KICKER_STATE_IDLE;
 static KickerBoardStatus kicker_status;
 static uint8_t pending_auto_percent = 0U;
 static uint32_t last_status_attempt_ms = 0U;
+static uint8_t consecutive_i2c_errors = 0U;
+
+static void RecordI2cSuccess(void)
+{
+  consecutive_i2c_errors = 0U;
+}
+
+static void RecordI2cError(void)
+{
+  kicker_dbg_online = 0U;
+  kicker_dbg_i2c_errors++;
+
+  if (consecutive_i2c_errors < UINT8_MAX)
+  {
+    consecutive_i2c_errors++;
+  }
+
+  if ((consecutive_i2c_errors >= KICKER_I2C_RECOVERY_THRESHOLD) &&
+      (kicker_i2c != NULL))
+  {
+    (void)HAL_I2C_DeInit(kicker_i2c);
+    HAL_Delay(1U);
+    if (HAL_I2C_Init(kicker_i2c) == HAL_OK)
+    {
+      kicker_dbg_i2c_recoveries++;
+    }
+    consecutive_i2c_errors = 0U;
+  }
+}
 
 static uint16_t ReadLe16(const uint8_t *data)
 {
@@ -63,11 +95,11 @@ static uint8_t SendCommand(uint8_t *command, uint16_t size)
   if (HAL_I2C_Master_Transmit(kicker_i2c, KICKER_BOARD_I2C_ADDRESS,
                               command, size, KICKER_I2C_TX_TIMEOUT_MS) != HAL_OK)
   {
-    kicker_dbg_online = 0U;
-    kicker_dbg_i2c_errors++;
+    RecordI2cError();
     return 0U;
   }
 
+  RecordI2cSuccess();
   kicker_dbg_commands_sent++;
   return 1U;
 }
@@ -101,6 +133,7 @@ void KickerBoard_Init(I2C_HandleTypeDef *hi2c)
   kicker_state = KICKER_STATE_IDLE;
   pending_auto_percent = 0U;
   last_status_attempt_ms = HAL_GetTick();
+  consecutive_i2c_errors = 0U;
   memset(&kicker_status, 0, sizeof(kicker_status));
 
   kicker_dbg_online = 0U;
@@ -119,6 +152,7 @@ void KickerBoard_Init(I2C_HandleTypeDef *hi2c)
   kicker_dbg_invalid_status = 0U;
   kicker_dbg_task_calls = 0U;
   kicker_dbg_status_reads = 0U;
+  kicker_dbg_i2c_recoveries = 0U;
 }
 
 uint8_t KickerBoard_RequestAutoKick(uint8_t percent)
@@ -213,10 +247,11 @@ uint8_t KickerBoard_ReadStatus(KickerBoardStatus *status)
                              buffer, sizeof(buffer),
                              KICKER_I2C_STATUS_TIMEOUT_MS) != HAL_OK)
   {
-    kicker_dbg_online = 0U;
-    kicker_dbg_i2c_errors++;
+    RecordI2cError();
     return 0U;
   }
+
+  RecordI2cSuccess();
 
   if ((buffer[0] != KICKER_STATUS_HEADER) ||
       (buffer[1] != KICKER_STATUS_VERSION))
@@ -312,9 +347,14 @@ void KickerBoard_Task(void)
     return;
   }
 
-  if (((kicker_state == KICKER_STATE_IDLE) ||
-       (kicker_state == KICKER_STATE_ERROR)) &&
+  if ((kicker_state == KICKER_STATE_IDLE) &&
       ((now - last_status_attempt_ms) >= KICKER_STATUS_PERIOD_MS))
+  {
+    kicker_state = (KickerBoard_ReadStatus(&kicker_status) != 0U) ?
+        KICKER_STATE_IDLE : KICKER_STATE_ERROR;
+  }
+  else if ((kicker_state == KICKER_STATE_ERROR) &&
+           ((now - last_status_attempt_ms) >= KICKER_STATUS_RETRY_MS))
   {
     kicker_state = (KickerBoard_ReadStatus(&kicker_status) != 0U) ?
         KICKER_STATE_IDLE : KICKER_STATE_ERROR;

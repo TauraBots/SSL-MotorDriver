@@ -7,7 +7,7 @@
 namespace
 {
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kMaxWheelRadS = 52.36f; // 500 RPM
+constexpr float kMaxWheelRadS = 500.0f * (2.0f * kPi / 60.0f); // 500 RPM
 // Electrical order: M1, M2, M3, M4
 // Physical placement:
 // M1: front-right, M2: front-left, M3: rear-left, M4: rear-right
@@ -21,13 +21,13 @@ OmniKinematics::OmniKinematics(float wheelRadiusM, float robotRadiusM)
       t_{},
       tPinv_{}
 {
-  if (r_ <= 0.0f)
+  if (!std::isfinite(r_) || r_ <= 0.0f)
   {
-    r_ = 0.03f;
+    r_ = ROBOT_WHEEL_RADIUS_M;
   }
-  if (l_ <= 0.0f)
+  if (!std::isfinite(l_) || l_ <= 0.0f)
   {
-    l_ = 0.09f;
+    l_ = ROBOT_CENTER_WHEEL_DISTANCE_M;
   }
   BuildMatrices();
 }
@@ -47,6 +47,19 @@ void OmniKinematics::RobotToWheels(float vx, float vy, float omega,
     if (rawW != nullptr)
     {
       rawW[i] = outW[i];
+    }
+  }
+  // Fail closed on invalid input or overflow, including the raw debug trace.
+  for (uint8_t i = 0; i < 4; i++)
+  {
+    if (!std::isfinite(outW[i]))
+    {
+      for (uint8_t j = 0; j < 4; j++)
+      {
+        outW[j] = 0.0f;
+        if (rawW != nullptr) rawW[j] = 0.0f;
+      }
+      return;
     }
   }
   float maxAbs = 0.0f;

@@ -63,11 +63,22 @@ Detalhes do modo de partida: [ELRS multi-robot match mode](docs/elrs-multi-robot
 Instale as dependências e abra a interface Qt 6:
 
 ```powershell
-python -m pip install -r scripts/requirements.txt
-python scripts/ssl-configurator.py
+python -m pip install -r configurator/requirements.txt
+python configurator/ssl-configurator.py
 ```
 
-Os comandos de terminal (`drive`, `discover` e `set-id`) continuam disponíveis.
+Na tela de controle, `TESTAR KICKER` permite escolher a potência e disparar
+um pulso no robô selecionado via rádio AirPort. O teste para o movimento,
+solicita freio e envia a sequência segura `kick=0`, pulso e `kick=0`.
+
+O mesmo teste pode ser executado pelo terminal:
+
+```powershell
+python configurator/ssl-configurator.py kick-test --port COM4 --robot-id A --kick-power 20
+```
+
+Os comandos de terminal (`drive`, `kick-test`, `discover` e `set-id`) continuam
+disponíveis.
 
 ## Git
 

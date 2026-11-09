@@ -36,7 +36,7 @@ class KickerBoardStaticTests(unittest.TestCase):
 
     def test_tx_and_status_timeouts_are_separate(self):
         self.assertIn("#define KICKER_I2C_TX_TIMEOUT_MS 2U", self.driver)
-        self.assertIn("#define KICKER_I2C_STATUS_TIMEOUT_MS 10U", self.driver)
+        self.assertIn("#define KICKER_I2C_STATUS_TIMEOUT_MS 30U", self.driver)
         send = self.function_body(self.driver, "SendCommand")
         read = self.function_body(self.driver, "KickerBoard_ReadStatus")
         self.assertIn("KICKER_I2C_TX_TIMEOUT_MS", send)
@@ -167,8 +167,16 @@ class KickerBoardStaticTests(unittest.TestCase):
         self.assertIn("g_safeStateActive = 1U", safe)
         self.assertIn("g_safeStateActive = 0U", accept)
 
-    def test_status_polling_remains_ten_hz(self):
-        self.assertIn("#define KICKER_STATUS_PERIOD_MS 100U", self.driver)
+    def test_status_polling_and_fast_error_retry(self):
+        self.assertIn("#define KICKER_STATUS_PERIOD_MS 20U", self.driver)
+        self.assertIn("#define KICKER_STATUS_RETRY_MS 5U", self.driver)
+
+    def test_i2c_recovers_after_consecutive_errors(self):
+        self.assertIn("#define KICKER_I2C_RECOVERY_THRESHOLD 3U", self.driver)
+        recovery = self.function_body(self.driver, "RecordI2cError")
+        self.assertIn("HAL_I2C_DeInit(kicker_i2c)", recovery)
+        self.assertIn("HAL_I2C_Init(kicker_i2c)", recovery)
+        self.assertIn("kicker_dbg_i2c_recoveries++", recovery)
 
     def test_main_initializes_and_services_after_serial(self):
         self.assertIn("KickerBoard_Init(&hi2c2);", self.main)

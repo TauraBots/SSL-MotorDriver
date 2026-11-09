@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "robot_config.h"
 
 struct OmniRobotTwist
 {
@@ -14,7 +15,8 @@ class OmniKinematics
 public:
   // Wheel mounting angles (deg): M1=30, M2=150, M3=225, M4=315
   // Rolling direction is tangential: theta_i = phi_i + 90 deg.
-  OmniKinematics(float wheelRadiusM = 0.03f, float robotRadiusM = 0.09f);
+  OmniKinematics(float wheelRadiusM = ROBOT_WHEEL_RADIUS_M,
+                 float robotRadiusM = ROBOT_CENTER_WHEEL_DISTANCE_M);
 
   // Robot -> wheels in rad/s. rawW, when provided, captures the values before
   // the common 500 RPM wheel saturation. omega is always expressed in rad/s.

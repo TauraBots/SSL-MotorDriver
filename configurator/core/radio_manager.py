@@ -28,6 +28,8 @@ class RadioManager(SerialManager):
         self._telemetry_requests = {}; self._last_full_request_ns = {}
         self._team_sequence = 0
         self._team_commands = self._safe_team_commands()
+        self._kicker_test_preamble_frames = 0
+        self._kicker_test_power = 0
         self.uplink_timeout_s = self.UPLINK_TIMEOUT_S
         self.uplink_probe_interval_ms = self.UPLINK_PROBE_INTERVAL_MS
         self._fleet_health_timer = QTimer(self); self._fleet_health_timer.setInterval(250)
@@ -56,6 +58,7 @@ class RadioManager(SerialManager):
         self._telemetry_requests.clear(); self._last_full_request_ns.clear()
         self._uplink_probe_index = 0; self._last_probe_ns = None
         self._team_sequence = 0; self._team_commands = self._safe_team_commands()
+        self._kicker_test_preamble_frames = 0; self._kicker_test_power = 0
         super().connect_serial(port, baud, robot_id)
 
     @staticmethod
@@ -164,9 +167,35 @@ class RadioManager(SerialManager):
             self._team_commands[active.robot_id] = replace(
                 self._team_commands[active.robot_id], kick_power=0, kick=False)
 
+    def queue_kicker_test(self, power):
+        """Queue a stationary radio test with a guaranteed low-to-high kick edge."""
+        active = self.robots.active_robot
+        power = max(1, min(100, int(power)))
+        if (not self.is_connected or active is None or not active.can_control or
+                active.robot_id not in self._team_commands):
+            return False
+        self._target = (0.0, 0.0, 0.0)
+        self._brake = True
+        self.state.vx = self.state.vy = self.state.omega = 0.0
+        self._kick_pending = False
+        self._kicker_test_preamble_frames = 2
+        self._kicker_test_power = power
+        return True
+
+    def _take_pending_kick(self):
+        if self._kicker_test_preamble_frames > 0:
+            self._kicker_test_preamble_frames -= 1
+            return 0
+        if self._kicker_test_power > 0:
+            power = self._kicker_test_power
+            self._kicker_test_power = 0
+            return power
+        return super()._take_pending_kick()
+
     def emergency_stop(self):
         self._target = (0.0, 0.0, 0.0); self._brake = True
         self._kick_pending = False
+        self._kicker_test_preamble_frames = 0; self._kicker_test_power = 0
         self.state.vx = self.state.vy = self.state.omega = 0.0
         self._team_commands = self._safe_team_commands()
         try:

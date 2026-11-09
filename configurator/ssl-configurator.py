@@ -17,6 +17,12 @@ RX_SOF0 = 0x55
 RX_SOF1 = 0xAA
 ROBOT_VELOCITY_TYPE = 0xD0
 ROBOT_VELOCITY_VERSION = 1
+TEAM_VELOCITY_TYPE = 0xD1
+TEAM_VELOCITY_VERSION = 1
+TEAM_ROBOT_IDS = ("A", "B", "C")
+TEAM_FLAG_KICK = 1 << 0
+TEAM_FLAG_BRAKE = 1 << 2
+TEAM_FLAG_ENABLED = 1 << 4
 TELEMETRY_REQUEST_TYPE = 0xE0
 TELEMETRY_RESPONSE_TYPE = 0xE1
 TELEMETRY_VERSION = 1
@@ -179,6 +185,76 @@ def encode_robot_velocity_packet(robot_id: str, sequence: int, vx: float, vy: fl
     return payload + struct.pack("<H", crc16_ccitt_false(payload))
 
 
+def encode_team_kicker_test_packet(robot_id: str, sequence: int, kick_power: int = 0,
+                                   enabled: bool = True) -> bytes:
+    """Encode one stationary D1 AirPort Team frame for a kicker radio test."""
+    robot_id = robot_id.upper()
+    if robot_id not in TEAM_ROBOT_IDS:
+        raise ValueError("--robot-id must be A, B or C for the AirPort Team kicker test")
+    kick_power = max(0, min(100, int(kick_power)))
+    payload = bytearray((0x55, 0xAA, TEAM_VELOCITY_TYPE, TEAM_VELOCITY_VERSION))
+    payload.extend(struct.pack("<H", sequence & 0xFFFF))
+    for slot_id in TEAM_ROBOT_IDS:
+        flags = TEAM_FLAG_BRAKE
+        slot_power = 0
+        if slot_id == robot_id and enabled:
+            flags |= TEAM_FLAG_ENABLED
+            if kick_power > 0:
+                flags |= TEAM_FLAG_KICK
+                slot_power = kick_power
+        payload.extend(struct.pack("<hhhBB", 0, 0, 0, slot_power, flags))
+    frame = packet_with_crc(bytes(payload))
+    assert len(frame) == 32
+    return frame
+
+
+def run_radio_kicker_test(args):
+    robot_id = args.robot_id.upper()
+    if robot_id not in TEAM_ROBOT_IDS:
+        raise ValueError("--robot-id must be A, B or C")
+    if not 1 <= args.kick_power <= 100:
+        raise ValueError("--kick-power must be between 1 and 100")
+    if not 1.0 <= args.rate_hz <= 100.0:
+        raise ValueError("--rate-hz must be between 1 and 100")
+    if not 0.0 <= args.hold_s <= 10.0:
+        raise ValueError("--hold-s must be between 0 and 10")
+
+    period_s = 1.0 / args.rate_hz
+    sequence = int(time.time() * 1000) & 0xFFFF
+
+    def send(ser, power=0, enabled=True):
+        nonlocal sequence
+        ser.write(encode_team_kicker_test_packet(
+            robot_id, sequence, kick_power=power, enabled=enabled))
+        ser.flush()
+        sequence = (sequence + 1) & 0xFFFF
+
+    with serial.Serial(args.port, args.baud, timeout=0.05, write_timeout=1.0) as ser:
+        time.sleep(0.25)
+        ser.reset_input_buffer()
+        print(f"AirPort kicker test: robot {robot_id}, {args.kick_power}%, "
+              f"{args.port} @ {args.baud}")
+        try:
+            print("Preparing low kick edge and stopping robot...")
+            for _ in range(3):
+                send(ser)
+                time.sleep(period_s)
+            print("KICK")
+            send(ser, power=args.kick_power)
+            time.sleep(period_s)
+            print("Returning kick to zero...")
+            for _ in range(max(3, round(args.hold_s * args.rate_hz))):
+                send(ser)
+                time.sleep(period_s)
+        finally:
+            print("Sending safe stop...")
+            for _ in range(3):
+                send(ser, enabled=False)
+                time.sleep(period_s)
+    print("Kicker radio test completed.")
+    return 0
+
+
 def encode_telemetry_request(robot_id: str, request_sequence: int,
                              flags: int = TELEMETRY_FLAGS_FULL) -> bytes:
     payload = struct.pack(
@@ -255,7 +331,7 @@ def parse_args():
     argv = sys.argv[1:]
     if not argv:
         argv.append("app")
-    elif argv[0] not in ("app", "drive", "discover", "set-id", "set-motion", "-h", "--help"):
+    elif argv[0] not in ("app", "drive", "kick-test", "discover", "set-id", "set-motion", "-h", "--help"):
         argv.insert(0, "drive")
 
     parser = argparse.ArgumentParser(description="TauraBots motor-driver application")
@@ -279,6 +355,18 @@ def parse_args():
     drive.add_argument("--accel-tau", type=float, default=0.18, help="Acceleration time constant")
     drive.add_argument("--stop-tau", type=float, default=0.08, help="Stop time constant")
     drive.add_argument("--log", help="Optional telemetry CSV output")
+
+    kick_test = actions.add_parser("kick-test", help="Test the kicker through AirPort Team radio")
+    kick_test.add_argument("--port", required=True, help="Serial port connected to the AirPort TX")
+    kick_test.add_argument("--baud", type=int, default=9600, help="AirPort serial baud rate")
+    kick_test.add_argument("--robot-id", default="A", choices=TEAM_ROBOT_IDS,
+                           help="Target robot A, B or C")
+    kick_test.add_argument("--kick-power", type=int, default=20,
+                           help="Kick power from 1 to 100 (default: 20)")
+    kick_test.add_argument("--rate-hz", type=float, default=20.0,
+                           help="D1 command rate (default: 20 Hz)")
+    kick_test.add_argument("--hold-s", type=float, default=1.0,
+                           help="Seconds to keep sending kick=0 after the pulse")
 
     discover = actions.add_parser("discover", help="Discover boards by immutable STM32 UID")
     discover.add_argument("--port", required=True)
@@ -936,6 +1024,8 @@ def main():
         return QtConfiguratorApp(args, sys.modules[__name__]).run()
     if args.action in ("discover", "set-id", "set-motion"):
         return run_config_action(args)
+    if args.action == "kick-test":
+        return run_radio_kicker_test(args)
 
     global pygame
     import pygame

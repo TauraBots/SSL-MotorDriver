@@ -51,6 +51,12 @@ typedef struct
 
 /* Temporary debugger instrumentation. Angular values use rad/s; wheel values
  * and PID references/feedback use RPM. These fields do not affect control. */
+extern volatile float dbg_motion_desired_xy[2];
+extern volatile float dbg_motion_limited_xy[2];
+extern volatile float dbg_motion_delta_theta;
+extern volatile float dbg_motion_measured_omega;
+extern volatile float dbg_motion_saturation_scale;
+extern volatile uint8_t dbg_motion_rotation_source;
 extern volatile float dbg_yaw_omega_cmd_rad_s;
 extern volatile float dbg_yaw_omega_limited_rad_s;
 extern volatile float dbg_yaw_wheel_raw_rpm[4];

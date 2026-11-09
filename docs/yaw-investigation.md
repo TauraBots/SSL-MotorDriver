@@ -1,5 +1,9 @@
 # Investigacao da rotacao angular
 
+> Registro histórico anterior à correção de geometria. Para o firmware atual,
+> resultados dos testes e roteiro de bancada, consulte
+> [Controle omnidirecional e validação](omni-motion-validation.md).
+
 ## Resultado
 
 A limitacao aparente em aproximadamente `150 RPM` nao e causada pelo PID nem

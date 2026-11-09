@@ -56,6 +56,7 @@ extern volatile uint32_t kicker_dbg_crc_errors;
 extern volatile uint32_t kicker_dbg_invalid_status;
 extern volatile uint32_t kicker_dbg_task_calls;
 extern volatile uint32_t kicker_dbg_status_reads;
+extern volatile uint32_t kicker_dbg_i2c_recoveries;
 
 #ifdef __cplusplus
 }

@@ -10,8 +10,8 @@ namespace
 constexpr float kRadSToRpm = 9.5492966f;
 constexpr float kNoteWheelRadiusM = 0.03175f;
 constexpr float kNoteRobotRadiusM = 0.07715f;
-constexpr float kFirmwareWheelRadiusM = 0.03f;
-constexpr float kFirmwareRobotRadiusM = 0.09f;
+constexpr float kFirmwareWheelRadiusM = ROBOT_WHEEL_RADIUS_M;
+constexpr float kFirmwareRobotRadiusM = ROBOT_CENTER_WHEEL_DISTANCE_M;
 
 bool Near(float a, float b, float tolerance = 0.05f)
 {
