@@ -3,9 +3,25 @@
 ## Interface
 
 - Porta: `USART2`
-- Baud rate: `9600`
+- Baud rate: `9600` nos modos bench e match AirPort Team; `420000` no match CRSF
 - Formato: `8N1`
 - RX com `DMA` circular
+
+Este documento descreve o protocolo Quad-MD usado no modo bench. O modo de
+partida (frame de time `D1`, discovery `E2/E3` e backend CRSF) está em
+[ELRS multi-robot match mode](elrs-multi-robot-match-mode.md).
+
+## Tipos de frame
+
+| Tipo | Direção | Tamanho | Uso | Modo |
+| --- | --- | ---: | --- | --- |
+| `0xD0` | host -> placa | 19 | comando de velocidade de um robô | bench |
+| `0xD1` | host -> placas | 32 | comando de velocidade para A, B e C num frame só | match |
+| `0xE0` | host -> placa | 10 | requisição de telemetria | bench e match |
+| `0xE1` | placa -> host | 11–51 | resposta de telemetria | bench e match |
+| `0xE2` | host -> placas | 8 | discovery de robôs | bench e match |
+| `0xE3` | placa -> host | 27 | resposta de discovery | bench e match |
+| `0xF0`–`0xF5` | ambos | 9–29 | identidade e configuração persistente | bench e service do match |
 
 ## Comando de velocidade do robô
 
@@ -50,14 +66,14 @@ protocolo de descoberta.
 Descobrir placas:
 
 ```text
-python scripts/ssl-configurator.py discover --port COM7 --baud 9600
+python configurator/ssl-configurator.py discover --port COM7 --baud 9600
 ```
 
 Configurar o ID logico de um UID especifico, com a placa reiniciada e antes de
 enviar comandos de motor:
 
 ```text
-python scripts/ssl-configurator.py set-id --port COM7 --baud 9600 --uid 0123456789ABCDEF01234567 --robot-id B
+python configurator/ssl-configurator.py set-id --port COM7 --baud 9600 --uid 0123456789ABCDEF01234567 --robot-id B
 ```
 
 Tipos de frame:
@@ -81,7 +97,7 @@ Os limites de aceleracao podem ser gravados pela aba `CONFIGURACAO DA PLACA` ou
 pela linha de comando:
 
 ```text
-python scripts/ssl-configurator.py set-motion --port COM7 --uid 0123456789ABCDEF01234567 --linear-accel 4.0 --angular-accel 10.0
+python configurator/ssl-configurator.py set-motion --port COM7 --uid 0123456789ABCDEF01234567 --linear-accel 4.0 --angular-accel 10.0
 ```
 
 O frame `0xF4` possui 29 bytes: header e tipo, UID de 12 bytes, dois `float32`
@@ -92,29 +108,38 @@ sao aplicados imediatamente e novamente carregados a cada inicializacao.
 
 ## Aplicativo do host
 
-O `scripts/ssl-configurator.py` concentra configuracao, controle e monitoramento.
+O `configurator/ssl-configurator.py` concentra configuracao, controle e monitoramento.
 Sem argumentos ele abre a interface grafica. Para
 dirigir o robo `B`, mostrar a telemetria ao vivo e grava-la em CSV:
 
 ```text
-python scripts/ssl-configurator.py drive --port COM7 --baud 9600 --robot-id B --log telemetry_B.csv
+python configurator/ssl-configurator.py drive --port COM7 --baud 9600 --robot-id B --log telemetry_B.csv
 ```
 
 Por compatibilidade, o nome da acao `drive` pode ser omitido:
 
 ```text
-python scripts/ssl-configurator.py drive --port COM7 --baud 9600 --robot-id B
+python configurator/ssl-configurator.py drive --port COM7 --baud 9600 --robot-id B
 ```
 
-Use `python scripts/ssl-configurator.py --help` para listar as acoes disponiveis.
+Use `python configurator/ssl-configurator.py --help` para listar as acoes disponiveis.
 A aba `ANÁLISE CSV` gera os gráficos dos arquivos gravados pelo aplicativo.
 
 Somente uma mudanca de `sequence` torna o comando novo. Frames repetidos nao
 renovam o watchdog. O D1 AirPort possui um watchdog MATCH de 120 ms; depois que
 o comando chega ao AppC, permanece tambem a protecao interna de 150 ms. Em
 timeout, os quatro setpoints sao zerados, o freio e ativado, os estados dos PIDs
-sao limpos e `kick_power` volta a zero. O kicker ainda nao possui acionamento
-fisico neste firmware.
+sao limpos, `kick_power` volta a zero e a placa do kicker recebe pedido de
+parada segura.
+
+## Kicker
+
+O kicker e acionado pela placa do kicker via `I2C2` (endereco 7 bits `0x42`).
+No `D0`, cada comando novo (nova `sequence`) com `kick_power` entre `1` e `100`
+pede um chute automatico com essa potencia; por isso o host deve mandar
+`kick_power = 0` antes e depois do pulso, como faz o teste `kick-test` do
+configurator. No `D1` e no CRSF o chute dispara somente na borda de subida da
+flag de chute.
 
 ## Telemetria enviada
 
