@@ -4,12 +4,15 @@ Firmware para uma placa controladora com `STM32F103RCTx` focada em 4 motores DC 
 
 O projeto usa STM32CubeIDE/HAL e implementa:
 
-- controle fechado de velocidade para 4 rodas
+- controle fechado de velocidade (PI + compensacao de atrito) para 4 rodas a 1 kHz
 - leitura de encoder em hardware
 - PWM de 30 kHz para ponte H
-- telemetria binaria via `USART2` no modo bench
-- conversao de velocidades do robo para velocidades das rodas
-- leitura da tensao de bateria por `ADC1`
+- cinematica omni com limitador de aceleracao e de velocidade
+- comunicacao por `USART2` nos modos bench (AirPort) e match (AirPort Team ou CRSF)
+- identidade persistente por placa (ID `A..Z` gravado na Flash)
+- acionamento da placa do kicker via `I2C2`
+- leitura da tensao de bateria por `ADC1`, com corte por subtensao
+- watchdog de comunicacao e watchdog independente (IWDG)
 
 Hardware configurado no CubeMX:
 
@@ -21,19 +24,30 @@ Hardware configurado no CubeMX:
   ou aplica `420000` nos backends CRSF
 - `TIM1/TIM8` para PWM
 - `TIM2/TIM3/TIM4/TIM5` para encoder
+- `TIM6` como base de tempo do controle em 1 kHz
+- `I2C2` em `PB10/PB11`, 100 kHz, para a placa do kicker
 
 Documentacao:
 
 - [Visao geral da placa](docs/board-overview.md)
 - [Protocolo serial](docs/serial-protocol.md)
+- [Controle omnidirecional e validacao](docs/omni-motion-validation.md)
+- [ELRS multi-robot match mode](docs/elrs-multi-robot-match-mode.md)
+- [Validacao AirPort em alta taxa](docs/airport-high-rate-validation.md)
+- [Validacao 120 Hz](docs/validation-120hz.md)
+- [Investigacao da rotacao angular](docs/yaw-investigation.md) (registro historico)
 
 Arquivos principais:
 
-- [main.c](/c:/Users/Thassio/STM32CubeIDE/workspace_1.19.0/YahBoom-4ch/Core/Src/main.c)
-- [app.cpp](/c:/Users/Thassio/STM32CubeIDE/workspace_1.19.0/YahBoom-4ch/Core/Src/app.cpp)
-- [motor.cpp](/c:/Users/Thassio/STM32CubeIDE/workspace_1.19.0/YahBoom-4ch/Core/Src/motor.cpp)
-- [encoder.cpp](/c:/Users/Thassio/STM32CubeIDE/workspace_1.19.0/YahBoom-4ch/Core/Src/encoder.cpp)
-- [omni_kinematics.cpp](/c:/Users/Thassio/STM32CubeIDE/workspace_1.19.0/YahBoom-4ch/Core/Src/omni_kinematics.cpp)
+- [main.c](Core/Src/main.c): inicializacao do CubeMX e laco principal
+- [app_c_api.cpp](Core/Src/app_c_api.cpp): ponte C/C++, tick de 1 kHz, estado seguro
+- [app.cpp](Core/Src/app.cpp): PID das rodas, bateria e protecoes
+- [omni_kinematics.cpp](Core/Src/omni_kinematics.cpp): robo <-> rodas
+- [acceleration_limiter.cpp](Core/Src/acceleration_limiter.cpp): rampas de velocidade
+- [motor.cpp](Core/Src/motor.cpp) e [encoder.cpp](Core/Src/encoder.cpp): acesso aos timers
+- [serial_service.c](Core/Src/serial_service.c): parser, comandos e telemetria
+- [kicker_board.c](Core/Src/kicker_board.c): protocolo I2C da placa do kicker
+- [robot_config.h](Core/Inc/robot_config.h): geometria e limites de movimento
 
 ## Build
 
